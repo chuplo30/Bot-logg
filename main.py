@@ -30,7 +30,7 @@ except ImportError:
 
 class LoggerEngine:
 
-    # ---------- WAN decoder ----------
+    # ==================== WAN XOR ====================
     @staticmethod
     def wan_xor(a: int, b: int) -> int:
         a %= 256
@@ -47,52 +47,82 @@ class LoggerEngine:
 
     @classmethod
     def decode_wan_strings(cls, text: str) -> List[str]:
+        """
+        Decoder WAN chịu được key random mỗi lần obfuscate.
+        """
         results = []
-        # Tìm các bảng string escaped của WAN
-        tables = re.findall(
-            r'local\s+\w+\s*=\s*\{((?:"(?:\\[0-9]{1,3})+"\s*,?\s*){1,10})\}',
+
+        table_match = re.search(
+            r'local\s+(\w+)\s*=\s*\{((?:"(?:\\[0-9]{1,3})+"\s*,?\s*)+)\}',
             text
         )
-        for raw in tables:
-            strs = re.findall(r'"((?:\\[0-9]{1,3})+)"', raw)
-            if len(strs) < 1:
-                continue
+        if not table_match:
+            return results
 
-            # checksum
-            checksum = 0
-            for s in strs:
-                for n in re.findall(r'\\([0-9]{1,3})', s):
-                    checksum = (checksum + int(n)) % 256
+        strs_raw = re.findall(r'"((?:\\[0-9]{1,3})+)"', table_match.group(2))
+        if not strs_raw:
+            return results
 
-            # thử các key phổ biến của WAN
-            candidates = []
-            for k1 in [12, 39, 42, 180, 181, 184, 209, 218]:
-                for k2 in range(0, 256, 1):
-                    candidates.append(cls.wan_xor(cls.wan_xor(checksum, k1), k2))
+        str_bytes = []
+        for s in strs_raw:
+            bs = [int(x) for x in re.findall(r'\\([0-9]{1,3})', s)]
+            str_bytes.append(bs)
 
-            for key in set(candidates):
-                decoded = []
-                ok = True
-                for s in strs:
-                    try:
-                        bs = [int(x) for x in re.findall(r'\\([0-9]{1,3})', s)]
-                        dec = "".join(chr(cls.wan_xor(b, key)) for b in bs)
-                        if all(32 <= ord(c) <= 126 or c in "\n\t\r" for c in dec):
-                            decoded.append(dec)
-                        else:
+        # checksum
+        checksum = 0
+        for bs in str_bytes:
+            for b in bs:
+                checksum = (checksum + b) % 256
+
+        # lấy bảng số đầu tiên
+        array_match = re.search(r'local\s+\w+\s*=\s*\{([0-9,\s]+)\}', text)
+        if not array_match:
+            return results
+        array_nums = [int(x) for x in re.findall(r'\d+', array_match.group(1))]
+        if not array_nums:
+            return results
+        first_val = array_nums[0]
+
+        best_decoded = []
+        best_score = -1
+
+        # các hằng số thường gặp trong WAN
+        common_a = [12, 39, 42, 180, 181, 184, 209, 218, 9, 16, 19, 31, 94, 100, 121, 144, 157, 234, 246, 253]
+        common_c = [221, 215, 228, 184, 42, 0, 1, 255] + array_nums[:8]
+
+        for a in common_a:
+            for b in range(256):
+                mid = cls.wan_xor(cls.wan_xor(checksum, a), b)
+                for c in common_c:
+                    key = cls.wan_xor(mid, cls.wan_xor(first_val, c % 256))
+
+                    decoded = []
+                    score = 0
+                    ok = True
+                    for bs in str_bytes:
+                        try:
+                            dec = "".join(chr(cls.wan_xor(bb, key)) for bb in bs)
+                            if all(32 <= ord(ch) <= 126 or ch in "\n\t\r" for ch in dec):
+                                decoded.append(dec)
+                                score += sum(ch.isalnum() or ch in " _.-" for ch in dec)
+                            else:
+                                ok = False
+                                break
+                        except Exception:
                             ok = False
                             break
-                    except Exception:
-                        ok = False
-                        break
-                if ok and decoded:
-                    for d in decoded:
-                        if len(d.strip()) > 2:
-                            results.append(d.strip())
-                    break
+
+                    if ok and score > best_score and decoded:
+                        best_score = score
+                        best_decoded = decoded
+
+        for d in best_decoded:
+            if len(d.strip()) > 1:
+                results.append(d.strip())
+
         return list(dict.fromkeys(results))
 
-    # ---------- Static ----------
+    # ==================== Static ====================
     @staticmethod
     def extract_byte_arrays(text: str) -> List[str]:
         results = []
@@ -114,7 +144,7 @@ class LoggerEngine:
     def xor_bruteforce(text: str) -> List[str]:
         results = []
         for pat in [r'"((?:\\[0-9]{1,3}){4,})"', r"'((?:\\[0-9]{1,3}){4,})'"]:
-            for s in re.findall(pat, text)[:30]:
+            for s in re.findall(pat, text)[:25]:
                 raw = [int(x) % 256 for x in re.findall(r"\\([0-9]{1,3})", s)]
                 if len(raw) < 4:
                     continue
@@ -139,7 +169,7 @@ class LoggerEngine:
         urls = [u for u in urls if "discord.com/api/webhooks" not in u.lower()]
         return list(dict.fromkeys(webhooks)), list(dict.fromkeys(urls))[:15]
 
-    # ---------- Sandbox (bay source) ----------
+    # ==================== Sandbox ====================
     @classmethod
     def sandbox_run(cls, code: str) -> Tuple[List[str], List[str], str]:
         if not LUPA_AVAILABLE:
@@ -238,19 +268,17 @@ class LoggerEngine:
                 if isinstance(src, str) and len(src) > 20:
                     dumped.append(src)
 
-            status = "Sandbox OK"
-            return logs, dumped, status
+            return logs, dumped, "Sandbox OK"
 
         except Exception as e:
             return logs, dumped, f"Sandbox fail: {e}"
 
-    # ---------- Analyze ----------
+    # ==================== Analyze ====================
     @classmethod
     def analyze(cls, filename: str, data: bytes) -> str:
         text = data.decode("utf-8", errors="replace")
         sha = hashlib.sha256(data).hexdigest()[:16]
-
-        is_wan = "WAN OBFUSCATE" in text[:200]
+        is_wan = "WAN OBFUSCATE" in text[:300]
 
         sandbox_logs, dumped_sources, sandbox_status = cls.sandbox_run(text)
         wan_strs = cls.decode_wan_strings(text) if is_wan else []
@@ -266,7 +294,7 @@ class LoggerEngine:
         report.append(f"TYPE        : {'WAN OBFUSCATE' if is_wan else 'Unknown / Other'}")
         report.append("")
 
-        # 1. SOURCE DUMP (quan trọng nhất)
+        # SOURCE DUMP
         report.append("=" * 55)
         report.append("SOURCE DUMP (loadstring / load)")
         report.append("=" * 55)
@@ -278,13 +306,13 @@ class LoggerEngine:
         else:
             report.append("[-] Không bắt được loadstring payload")
             if is_wan:
-                report.append("    → WAN VM nặng thường không dùng loadstring plain")
+                report.append("    → WAN VM thường không đưa full source vào loadstring")
         report.append("")
 
-        # 2. WAN strings
+        # WAN strings
         if is_wan or wan_strs:
             report.append("=" * 55)
-            report.append("WAN STRING TABLE")
+            report.append("WAN STRING TABLE (decoded)")
             report.append("=" * 55)
             if wan_strs:
                 for s in wan_strs:
@@ -293,31 +321,31 @@ class LoggerEngine:
                 report.append("  - Không decode được string table")
             report.append("")
 
-        # 3. Dynamic logs
+        # Dynamic
         report.append("=" * 55)
         report.append("DYNAMIC LOGS")
         report.append("=" * 55)
         report.append(f"Status: {sandbox_status}")
         if sandbox_logs:
-            for l in sandbox_logs[:30]:
+            for l in sandbox_logs[:25]:
                 report.append(f"  + {l}")
         else:
             report.append("  - Không có log")
         report.append("")
 
-        # 4. Static
+        # Static
         report.append("=" * 55)
         report.append("STATIC DECODE")
         report.append("=" * 55)
         static = list(dict.fromkeys(xor_res + byte_res))
         if static:
-            for s in static[:15]:
+            for s in static[:12]:
                 report.append(f"  + {s[:180]}")
         else:
             report.append("  - Không decode được")
         report.append("")
 
-        # 5. Network
+        # Network
         report.append("=" * 55)
         report.append("NETWORK / THREAT")
         report.append("=" * 55)
@@ -347,7 +375,7 @@ def run_flask():
     app.run(host="0.0.0.0", port=port)
 
 
-# ============ Bot ============
+# ============ Bot commands ============
 @bot.event
 async def on_ready():
     print(f"[ONLINE] {bot.user} | Lupa: {LUPA_AVAILABLE}")
