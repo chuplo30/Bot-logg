@@ -1600,6 +1600,8 @@ async def l_cmd(ctx: commands.Context, link: Optional[str] = None):
         await status_msg.edit(content=f"Error: `{e}`")
 
 
+bot.remove_command('help')
+
 @bot.command(name="help")
 async def help_cmd(ctx: commands.Context):
     """.help -- show usage."""
