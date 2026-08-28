@@ -33,7 +33,7 @@ import discord
 from discord.ext import commands
 from flask import Flask
 
-from lua_deobf_toolkit import LuaDeobfuscator
+from main import LuaDeobfuscator
 
 # ============================================================
 # Config
