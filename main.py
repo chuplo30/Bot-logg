@@ -1,438 +1,191 @@
-import hashlib
-import io
+#!/usr/bin/env python3
+"""
+Discord bot wrapper for lua_deobf_toolkit.py
+
+Command:
+  .log   (attach a .lua/.txt file to the message)
+
+Behavior:
+  - Downloads the attached file
+  - Runs it through LuaDeobfuscator
+  - Strips comments (-- line comments and --[[ ]] block comments,
+    including the toolkit's own header comments) from the recovered source
+  - Replies with the cleaned source, as a code block if short enough,
+    otherwise as a .lua file attachment
+
+Requirements:
+  pip install discord.py
+  pip install flask      # keep-alive server so Render sees the service as up
+  pip install lupa       # optional but recommended, enables VM execution
+
+Setup:
+  1. Put this file in the SAME folder as lua_deobf_toolkit.py
+  2. Set your bot token below (or via env var DISCORD_BOT_TOKEN)
+  3. python lua_deobf_bot.py
+"""
+
 import os
 import re
-from typing import List, Tuple
-from threading import Thread
+import tempfile
+import threading
 
 import discord
 from discord.ext import commands
 from flask import Flask
 
-# ============ CONFIG ============
-TOKEN = os.getenv("DISCORD_TOKEN")
-PREFIX = "!"
-MAX_FILE_SIZE = 8 * 1024 * 1024
-MAX_FILES_PER_CMD = 8
-ALLOWED_EXT = {".lua", ".txt", ".luau", ".lua.txt"}
+from lua_deobf_toolkit import LuaDeobfuscator
+
+# ============================================================
+# Config
+# ============================================================
+
+TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "PASTE_YOUR_BOT_TOKEN_HERE")
+COMMAND_PREFIX = "."
+DISCORD_MSG_LIMIT = 1900  # leave headroom under the 2000 char hard limit
+
+
+# ============================================================
+# Keep-alive web server
+# ============================================================
+# Render (and most host-a-web-service platforms) expect the process to
+# bind a port and answer HTTP requests, or it marks the service as down
+# and restarts/kills it. The Discord bot itself doesn't need HTTP for
+# anything — this Flask app exists purely to keep Render happy.
+
+keep_alive_app = Flask(__name__)
+
+
+@keep_alive_app.route("/")
+def _health():
+    return "Bot is running."
+
+
+def _run_keep_alive():
+    port = int(os.environ.get("PORT", 8080))
+    keep_alive_app.run(host="0.0.0.0", port=port)
+
+
+def start_keep_alive():
+    threading.Thread(target=_run_keep_alive, daemon=True).start()
 
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 
-# ============ LUPA ============
-try:
-    from lupa import LuaRuntime
-    LUPA_AVAILABLE = True
-except ImportError:
-    LUPA_AVAILABLE = False
+bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents)
+
+# Deobfuscator is stateful (loads a Lua VM once), reuse a single instance
+deobfuscator = LuaDeobfuscator(verbose=False)
 
 
-class LoggerEngine:
+# ============================================================
+# Comment stripping
+# ============================================================
 
-    # ==================== WAN XOR ====================
-    @staticmethod
-    def wan_xor(a: int, b: int) -> int:
-        a %= 256
-        b %= 256
-        r, p = 0, 1
-        for _ in range(8):
-            x, y = a % 2, b % 2
-            if x != y:
-                r += p
-            a = (a - x) // 2
-            b = (b - y) // 2
-            p *= 2
-        return r
+def strip_lua_comments(source: str) -> str:
+    """
+    Best-effort removal of Lua comments from source text.
 
-    @classmethod
-    def decode_wan_strings(cls, text: str) -> List[str]:
-        """
-        Decoder WAN chịu được key random mỗi lần obfuscate.
-        """
-        results = []
+    Handles:
+      - Block comments: --[[ ... ]], --[=[ ... ]=], etc.
+      - Line comments: -- until end of line
 
-        table_match = re.search(
-            r'local\s+(\w+)\s*=\s*\{((?:"(?:\\[0-9]{1,3})+"\s*,?\s*)+)\}',
-            text
-        )
-        if not table_match:
-            return results
+    Caveat: this is a plain-text pass, not a real Lua tokenizer, so a
+    literal "--" inside a string literal could in rare cases get cut.
+    Good enough for cleaning toolkit output / typical scripts.
+    """
+    # Remove block comments --[[ ]], --[=[ ]=], --[==[ ]==], ...
+    source = re.sub(r"--\[(=*)\[.*?\]\1\]", "", source, flags=re.DOTALL)
 
-        strs_raw = re.findall(r'"((?:\\[0-9]{1,3})+)"', table_match.group(2))
-        if not strs_raw:
-            return results
+    # Remove line comments, but skip lines that are inside a long string
+    # (best-effort: just strip a trailing "-- ..." per line)
+    cleaned_lines = []
+    for line in source.split("\n"):
+        # Don't touch the line if "--" only appears inside quotes in an
+        # obvious way; this is a heuristic, not a parser.
+        idx = line.find("--")
+        if idx != -1:
+            # crude quote-balance check before the "--"
+            before = line[:idx]
+            if before.count('"') % 2 == 0 and before.count("'") % 2 == 0:
+                line = before.rstrip()
+        cleaned_lines.append(line)
 
-        str_bytes = []
-        for s in strs_raw:
-            bs = [int(x) for x in re.findall(r'\\([0-9]{1,3})', s)]
-            str_bytes.append(bs)
+    result = "\n".join(cleaned_lines)
 
-        # checksum
-        checksum = 0
-        for bs in str_bytes:
-            for b in bs:
-                checksum = (checksum + b) % 256
-
-        # lấy bảng số đầu tiên
-        array_match = re.search(r'local\s+\w+\s*=\s*\{([0-9,\s]+)\}', text)
-        if not array_match:
-            return results
-        array_nums = [int(x) for x in re.findall(r'\d+', array_match.group(1))]
-        if not array_nums:
-            return results
-        first_val = array_nums[0]
-
-        best_decoded = []
-        best_score = -1
-
-        # các hằng số thường gặp trong WAN
-        common_a = [12, 39, 42, 180, 181, 184, 209, 218, 9, 16, 19, 31, 94, 100, 121, 144, 157, 234, 246, 253]
-        common_c = [221, 215, 228, 184, 42, 0, 1, 255] + array_nums[:8]
-
-        for a in common_a:
-            for b in range(256):
-                mid = cls.wan_xor(cls.wan_xor(checksum, a), b)
-                for c in common_c:
-                    key = cls.wan_xor(mid, cls.wan_xor(first_val, c % 256))
-
-                    decoded = []
-                    score = 0
-                    ok = True
-                    for bs in str_bytes:
-                        try:
-                            dec = "".join(chr(cls.wan_xor(bb, key)) for bb in bs)
-                            if all(32 <= ord(ch) <= 126 or ch in "\n\t\r" for ch in dec):
-                                decoded.append(dec)
-                                score += sum(ch.isalnum() or ch in " _.-" for ch in dec)
-                            else:
-                                ok = False
-                                break
-                        except Exception:
-                            ok = False
-                            break
-
-                    if ok and score > best_score and decoded:
-                        best_score = score
-                        best_decoded = decoded
-
-        for d in best_decoded:
-            if len(d.strip()) > 1:
-                results.append(d.strip())
-
-        return list(dict.fromkeys(results))
-
-    # ==================== Static ====================
-    @staticmethod
-    def extract_byte_arrays(text: str) -> List[str]:
-        results = []
-        for m in re.findall(r"\{([0-9\s,]{15,})\}", text):
-            nums = re.findall(r"\d+", m)
-            if len(nums) < 6:
-                continue
-            try:
-                data = bytes(int(n) % 256 for n in nums)
-                decoded = data.decode("utf-8", errors="ignore")
-                readable = sum(32 <= ord(c) <= 126 for c in decoded)
-                if len(decoded) > 4 and readable / max(len(decoded), 1) > 0.7:
-                    results.append(decoded.strip())
-            except Exception:
-                pass
-        return results
-
-    @staticmethod
-    def xor_bruteforce(text: str) -> List[str]:
-        results = []
-        for pat in [r'"((?:\\[0-9]{1,3}){4,})"', r"'((?:\\[0-9]{1,3}){4,})'"]:
-            for s in re.findall(pat, text)[:25]:
-                raw = [int(x) % 256 for x in re.findall(r"\\([0-9]{1,3})", s)]
-                if len(raw) < 4:
-                    continue
-                best_score, best_dec = 0, ""
-                for key in range(256):
-                    dec = bytes(b ^ key for b in raw)
-                    score = sum(32 <= b <= 126 or b in (9, 10, 13) for b in dec)
-                    if score > best_score:
-                        best_score = score
-                        best_dec = dec.decode("utf-8", errors="replace")
-                if best_score > len(raw) * 0.65 and len(best_dec.strip()) > 5:
-                    results.append(best_dec.strip())
-        return list(dict.fromkeys(results))
-
-    @staticmethod
-    def find_urls_webhooks(text: str) -> Tuple[List[str], List[str]]:
-        webhooks = re.findall(
-            r"https?://(?:discord(?:app)?\.com/api/webhooks|canary\.discord\.com/api/webhooks)/[^\s\"'`<>]+",
-            text, re.I
-        )
-        urls = re.findall(r"https?://[^\s\"'`<>]+", text, re.I)
-        urls = [u for u in urls if "discord.com/api/webhooks" not in u.lower()]
-        return list(dict.fromkeys(webhooks)), list(dict.fromkeys(urls))[:15]
-
-    # ==================== Sandbox ====================
-    @classmethod
-    def sandbox_run(cls, code: str) -> Tuple[List[str], List[str], str]:
-        if not LUPA_AVAILABLE:
-            return [], [], "Lupa không khả dụng"
-
-        logs = []
-        dumped = []
-
-        try:
-            lua = LuaRuntime(unpack_returned_tuples=True)
-
-            setup = r"""
-            local captured = {}
-            local dumped_sources = {}
-
-            local function log(tag, val)
-                table.insert(captured, string.format("[%s] %s", tostring(tag), tostring(val)))
-            end
-
-            local function http_hook(opts, ...)
-                local url = opts
-                if type(opts) == "table" then
-                    url = opts.Url or opts.url or opts[1] or "unknown"
-                end
-                log("HTTP", tostring(url))
-                return {StatusCode=200, Body='print("hooked")', Headers={}}
-            end
-
-            request = http_hook
-            http_request = http_hook
-            httprequest = http_hook
-            syn = {request = http_hook, protect_gui = function() end}
-            fluxus = {request = http_hook}
-            krnl = {request = http_hook}
-            delta = {request = http_hook}
-            executor = {request = http_hook}
-
-            loadstring = function(payload, ...)
-                if type(payload) == "string" and #payload > 15 then
-                    table.insert(dumped_sources, payload)
-                    log("LOADSTRING", "Bắt được source (" .. #payload .. " chars)")
-                end
-                return function() end
-            end
-            load = loadstring
-
-            print = function(...)
-                local t = {}
-                for i,v in ipairs({...}) do t[i] = tostring(v) end
-                log("PRINT", table.concat(t, "\t"))
-            end
-            warn = print
-            rconsoleprint = function(m) log("RCONSOLE", tostring(m)) end
-            writefile = function(f,d) log("WRITEFILE", tostring(f).." -> "..tostring(d)) end
-            appendfile = function(f,d) log("APPENDFILE", tostring(f).." -> "..tostring(d)) end
-
-            local function dummy()
-                return setmetatable({}, {
-                    __index = function(_, k)
-                        if k == "HttpGet" or k == "HttpGetAsync" or k == "HttpPost" then
-                            return function(_, url)
-                                log("GAME_HTTP", tostring(url))
-                                return ""
-                            end
-                        end
-                        return dummy()
-                    end,
-                    __call = function() return dummy() end,
-                    __tostring = function() return "Instance" end
-                })
-            end
-            game = dummy()
-            workspace = dummy()
-            script = dummy()
-            Instance = {new = function() return dummy() end}
-            getgenv = function() return _G end
-            getrenv = function() return _G end
-            getfenv = getfenv or function() return _G end
-            _G = _G or {}
-
-            return captured, dumped_sources
-            """
-
-            captured, dumped_sources = lua.eval(setup)
-            lua.execute("debug.sethook(function() error('timeout') end, '', 400000)")
-
-            try:
-                lua.execute(code)
-            except Exception as e:
-                logs.append(f"[SANDBOX] {e}")
-
-            for item in captured.values():
-                logs.append(str(item))
-
-            for src in dumped_sources.values():
-                if isinstance(src, str) and len(src) > 20:
-                    dumped.append(src)
-
-            return logs, dumped, "Sandbox OK"
-
-        except Exception as e:
-            return logs, dumped, f"Sandbox fail: {e}"
-
-    # ==================== Analyze ====================
-    @classmethod
-    def analyze(cls, filename: str, data: bytes) -> str:
-        text = data.decode("utf-8", errors="replace")
-        sha = hashlib.sha256(data).hexdigest()[:16]
-        is_wan = "WAN OBFUSCATE" in text[:300]
-
-        sandbox_logs, dumped_sources, sandbox_status = cls.sandbox_run(text)
-        wan_strs = cls.decode_wan_strings(text) if is_wan else []
-        xor_res = cls.xor_bruteforce(text)
-        byte_res = cls.extract_byte_arrays(text)
-        webhooks, urls = cls.find_urls_webhooks(text)
-
-        report = []
-        report.append(f"FILE        : {filename}")
-        report.append(f"SIZE        : {len(data):,} bytes")
-        report.append(f"SHA         : {sha}")
-        report.append(f"LUPA        : {'OK' if LUPA_AVAILABLE else 'OFF'}")
-        report.append(f"TYPE        : {'WAN OBFUSCATE' if is_wan else 'Unknown / Other'}")
-        report.append("")
-
-        # SOURCE DUMP
-        report.append("=" * 55)
-        report.append("SOURCE DUMP (loadstring / load)")
-        report.append("=" * 55)
-        if dumped_sources:
-            report.append(f"[!!!] BẮT ĐƯỢC {len(dumped_sources)} SOURCE:")
-            for i, src in enumerate(dumped_sources, 1):
-                report.append(f"\n----- SOURCE #{i} ({len(src)} chars) -----")
-                report.append(src[:3000] + ("\n... [cắt]" if len(src) > 3000 else ""))
-        else:
-            report.append("[-] Không bắt được loadstring payload")
-            if is_wan:
-                report.append("    → WAN VM thường không đưa full source vào loadstring")
-        report.append("")
-
-        # WAN strings
-        if is_wan or wan_strs:
-            report.append("=" * 55)
-            report.append("WAN STRING TABLE (decoded)")
-            report.append("=" * 55)
-            if wan_strs:
-                for s in wan_strs:
-                    report.append(f"  + {s}")
-            else:
-                report.append("  - Không decode được string table")
-            report.append("")
-
-        # Dynamic
-        report.append("=" * 55)
-        report.append("DYNAMIC LOGS")
-        report.append("=" * 55)
-        report.append(f"Status: {sandbox_status}")
-        if sandbox_logs:
-            for l in sandbox_logs[:25]:
-                report.append(f"  + {l}")
-        else:
-            report.append("  - Không có log")
-        report.append("")
-
-        # Static
-        report.append("=" * 55)
-        report.append("STATIC DECODE")
-        report.append("=" * 55)
-        static = list(dict.fromkeys(xor_res + byte_res))
-        if static:
-            for s in static[:12]:
-                report.append(f"  + {s[:180]}")
-        else:
-            report.append("  - Không decode được")
-        report.append("")
-
-        # Network
-        report.append("=" * 55)
-        report.append("NETWORK / THREAT")
-        report.append("=" * 55)
-        if webhooks:
-            report.append("[!!!] DISCORD WEBHOOK:")
-            for w in webhooks:
-                report.append(f"  → {w}")
-        if urls:
-            report.append("[!] URLs:")
-            for u in urls:
-                report.append(f"  → {u}")
-        if not webhooks and not urls:
-            report.append("✓ Không thấy webhook/url rõ")
-
-        return "\n".join(report)
+    # Collapse runs of blank lines left behind by stripped comments
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result.strip()
 
 
-# ============ Flask keep-alive ============
-app = Flask(__name__)
+# ============================================================
+# Bot events / commands
+# ============================================================
 
-@app.route("/")
-def home():
-    return f"Logger Bot running | Lupa: {LUPA_AVAILABLE}"
-
-def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
-
-
-# ============ Bot commands ============
 @bot.event
 async def on_ready():
-    print(f"[ONLINE] {bot.user} | Lupa: {LUPA_AVAILABLE}")
+    print(f"[+] Logged in as {bot.user} (id={bot.user.id})")
 
 
 @bot.command(name="log")
 async def log_cmd(ctx: commands.Context):
-    files = []
-    for att in ctx.message.attachments[:MAX_FILES_PER_CMD]:
-        if att.size > MAX_FILE_SIZE:
-            await ctx.send(f"❌ `{att.filename}` quá lớn")
-            continue
-        ext = os.path.splitext(att.filename.lower())[1]
-        if ext not in ALLOWED_EXT and not att.filename.lower().endswith(".lua.txt"):
-            continue
-        data = await att.read()
-        files.append((att.filename, data))
+    """.log — attach a .lua/.txt file to deobfuscate it and strip comments."""
 
-    content = ctx.message.content[len(PREFIX + "log"):].strip()
-    if content.startswith("```"):
-        content = re.sub(r"^```(?:lua|luau)?\n?", "", content)
-        content = re.sub(r"\n?```$", "", content)
-    if content and len(content) > 30:
-        files.append(("pasted.lua", content.encode()))
-
-    if not files:
-        await ctx.send("❌ Gửi file `.lua`/`.txt` hoặc paste code sau `!log`")
+    if not ctx.message.attachments:
+        await ctx.reply("Attach a `.lua` or `.txt` file with the command.")
         return
 
-    msg = await ctx.send(f"🔎 Đang quét **{len(files)}** file...")
+    attachment = ctx.message.attachments[0]
+    if not attachment.filename.lower().endswith((".lua", ".txt")):
+        await ctx.reply("File must be `.lua` or `.txt`.")
+        return
 
-    reports = []
-    for name, data in files:
-        try:
-            reports.append(LoggerEngine.analyze(name, data))
-        except Exception as e:
-            reports.append(f"FILE: {name}\nLỖI: {e}")
+    status_msg = await ctx.reply(f"⏳ Deobfuscating `{attachment.filename}`...")
 
-    full = ("\n\n" + "=" * 60 + "\n\n").join(reports)
+    try:
+        raw_bytes = await attachment.read()
+        code = raw_bytes.decode("utf-8", errors="replace")
 
-    if len(full) <= 1900:
-        await msg.edit(content=f"```text\n{full}\n```")
-    else:
-        buf = io.BytesIO(full.encode("utf-8"))
-        await msg.edit(
-            content=f"✅ Xong **{len(files)}** file",
-            attachments=[discord.File(buf, "logger_report.txt")]
-        )
+        obf_name, source, meta = deobfuscator.deobfuscate(code, attachment.filename)
+        cleaned = strip_lua_comments(source)
 
+        header = f"Obfuscator detected: **{obf_name}**\n"
 
-@bot.command(name="ping")
-async def ping(ctx):
-    await ctx.send(f"Pong | Lupa: `{LUPA_AVAILABLE}`")
+        if not cleaned.strip():
+            # deobfuscate() returned only comment lines (e.g. "Requires VM
+            # execution for full deobfuscation") -> stripping comments left
+            # nothing. Surface the real reason instead of sending blank output.
+            reason = source.strip() or "No source could be recovered."
+            await status_msg.edit(
+                content=(
+                    f"{header}⚠️ Nothing left after stripping comments — "
+                    f"the deobfuscator itself didn't recover real source, "
+                    f"it only returned notes:\n```\n{reason}\n```"
+                    f"{'(lupa not installed — install it for VM execution)' if not deobfuscator.engine.available else ''}"
+                )
+            )
+            return
+
+        if len(cleaned) <= DISCORD_MSG_LIMIT:
+            await status_msg.edit(
+                content=f"{header}```lua\n{cleaned}\n```"
+            )
+        else:
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".lua", delete=False, encoding="utf-8"
+            ) as f:
+                f.write(cleaned)
+                tmp_path = f.name
+
+            await status_msg.edit(content=header)
+            await ctx.send(file=discord.File(tmp_path, filename="deobfuscated.lua"))
+            os.remove(tmp_path)
+
+    except Exception as e:
+        await status_msg.edit(content=f"❌ Error: `{e}`")
 
 
 if __name__ == "__main__":
-    if not TOKEN:
-        raise RuntimeError("Thiếu DISCORD_TOKEN")
-    Thread(target=run_flask, daemon=True).start()
+    if TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE":
+        print("[!] Set DISCORD_BOT_TOKEN env var or edit TOKEN in this file.")
+    start_keep_alive()
     bot.run(TOKEN)
