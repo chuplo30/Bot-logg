@@ -1,5 +1,3 @@
-
-
 import re
 import sys
 import os
@@ -9,7 +7,6 @@ import time
 import json
 import math
 import tempfile
-import multiprocessing
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple, Any
 
@@ -95,6 +92,8 @@ bit32.replace=function(a,v,f,w) w=w or 1;local m=bit32.lshift(2^w-1,f);return bi
 if not _G.getfenv then _G.getfenv=function(l) return _G end end
 if not _G.getgenv then _G.getgenv=function() return _G end end
 if not _G.setfenv then _G.setfenv=function() end end
+if not _G.unpack then _G.unpack=table.unpack end
+if not _G.select then _G.select=select end
 
 local function deep_stub()
     return setmetatable({},{
@@ -235,6 +234,15 @@ class ObfuscatorDetector:
         ("Luraph", ["Luraph", "luraph"]),
         ("Oxy", ["Oxy"]),
         ("WeAreDev", ["wearedevs.net/obfuscator"]),
+        ("Kraken", ["kraken", "Kraken", "$@kraken"]),
+        ("Fusion", ["Fusion", "fusion_obf"]),
+        ("Avalanche", ["Avalanche", "avalanche_obf"]),
+        ("Luraph", ["luraph", "LURAPH"]),
+        ("Tempest", ["Tempest", "tempest_obf"]),
+        ("Novoline", ["novoline", "Novoline"]),
+        ("KAVVM", ["KAVVM", "kavvm"]),
+        ("Yustream", ["Yustream", "yustream"]),
+        ("Custom VM", ["IlI000o", "IIioOool"]),
     ]
 
     @classmethod
@@ -243,6 +251,9 @@ class ObfuscatorDetector:
             for sig in sigs:
                 if sig in code:
                     return name
+        # WeAreDev: detect by P-table + CFF pattern even if comment stripped
+        if re.search(r'return\(function\([a-zA-Z,]+\).*local\s+\w+=\{"', code, re.DOTALL):
+            return "WeAreDev"
         if cls._has_vm_pattern(code):
             return "Unknown VM-based"
         if cls._is_base64_compressed(code):
@@ -257,7 +268,7 @@ class ObfuscatorDetector:
             r"setmetatable.*__index",
             r"while true do.*elseif.*==",
         ]
-        return sum(1 for p in indicators if re.search(p, code)) >= 3
+        return sum(1 for p in indicators if re.search(p, code)) >= 2
 
     @classmethod
     def _is_base64_compressed(cls, code: str) -> bool:
@@ -897,7 +908,7 @@ class WeAreDevDeobfuscator:
         """
         m = re.search(r'local function (\w+)\(\w+\)return \w+\[\w+([+-])\(?([^)]+?)\)?\]end', obf)
         if not m:
-            m = re.search(r'local function (\w+)\(\w+\)return \w+\[\w+([+-])(\d+)\]end', obf)
+            m = re.search(r'local function (\w+)\(\w+\)return \w+\[\w+([+-])([^\]]+)\]end', obf)
         if m:
             func_name = m.group(1)
             sign = m.group(2)
@@ -922,7 +933,7 @@ class WeAreDevDeobfuscator:
         return string_map
 
     # Embedded tracer Lua environment (self-contained - no external files needed)
-    _TRACER_LUA = 'local _trace = {}\nlocal _trace_n = 0\nlocal _orig_print = print\n\nlocal function safe_tostring(v)\n    if type(v) == "string" then\n        return string.format("%q", v)\n    end\n    if type(v) == "nil" then return "nil" end\n    if type(v) == "boolean" then return tostring(v) end\n    if type(v) == "function" then return "function" end\n    if type(v) == "table" then return "{}" end\n    return tostring(v)\nend\n\nlocal function T(entry)\n    _trace_n = _trace_n + 1\n    _trace[_trace_n] = entry\n    _orig_print("[T]" .. entry)\nend\n\nlocal function traced_print(...)\n    local args = {...}\n    local strs = {}\n    for i, v in ipairs(args) do\n        strs[i] = tostring(v)\n    end\n    local line = table.concat(strs, "\\t")\n    _orig_print("[P]" .. line)\n    local arg_strs = {}\n    for i, v in ipairs(args) do\n        arg_strs[i] = safe_tostring(v)\n    end\n    T("print(" .. table.concat(arg_strs, ", ") .. ")")\nend\n\nlocal function make_chain_tracer(name)\n    local proxy = {}\n    local full_path = name\n    local mt = {\n        __index = function(t, k)\n            local kstr = type(k) == "string" and k or tostring(k)\n            T(full_path .. "." .. kstr)\n            local new_path = full_path .. "." .. kstr\n            return make_chain_tracer(new_path)\n        end,\n        __newindex = function(t, k, v)\n            local kstr = type(k) == "string" and k or tostring(k)\n            local vstr = safe_tostring(v)\n            T(full_path .. "." .. kstr .. " = " .. vstr)\n        end,\n        __call = function(t, ...)\n            local args = {}\n            for i, a in ipairs({...}) do\n                args[i] = safe_tostring(a)\n            end\n            T(full_path .. "(" .. table.concat(args, ", ") .. ")")\n            return make_chain_tracer(full_path .. "()")\n        end,\n        __tostring = function(t) return full_path end,\n        __concat = function(a, b) return "" end,\n        __len = function(t) return 0 end,\n        __add = function(a, b) return 0 end,\n        __sub = function(a, b) return 0 end,\n        __mul = function(a, b) return 0 end,\n        __div = function(a, b) return 0 end,\n        __mod = function(a, b) return 0 end,\n        __pow = function(a, b) return 0 end,\n        __eq = function(a, b) return false end,\n        __lt = function(a, b) return false end,\n        __le = function(a, b) return false end,\n    }\n    setmetatable(proxy, mt)\n    return proxy\nend\nlocal make_tracer = make_chain_tracer\n\n_G.print = traced_print\n_G.warn = traced_print\n_G.info = traced_print\n\nif not _G.getfenv then _G.getfenv = function(l) return _G end end\nif not _G.getgenv then _G.getgenv = function() return _G end end\nif not _G.setfenv then _G.setfenv = function() end end\nif not _G.unpack then _G.unpack = table.unpack end\n\nlocal _orig_pcall = pcall\n_G.pcall = function(f, ...)\n    local results = {_orig_pcall(f, ...)}\n    local ok = results[1]\n    if not ok then\n        local err = tostring(results[2])\n        if not err:find("pow", 1, true) then\n            T("-- pcall error: " .. err)\n        end\n    end\n    return table.unpack(results)\nend\n\nlocal _orig_xpcall = xpcall\n_G.xpcall = function(f, handler, ...)\n    local results = {_orig_xpcall(f, handler, ...)}\n    local ok = results[1]\n    if not ok then\n        T("-- xpcall error: " .. tostring(results[2]))\n    end\n    return table.unpack(results)\nend\n\nlocal _orig_load = loadstring or load\nif _orig_load then\n    local _real_load = _orig_load\n    _G.load = function(src, ...)\n        if src == nil then return nil, "cannot load nil" end\n        if type(src) ~= "string" and type(src) ~= "function" then\n            local ok, r1, r2 = pcall(_real_load, src, ...)\n            if ok then return r1, r2 else return nil, r2 end\n        end\n        if type(src) == "string" and #src > 5 then\n            local first100 = src:sub(1, 100)\n            if not first100:find("bit32", 1, true) and not first100:find("4294967296", 1, true) then\n                T("-- loadstring called (" .. #src .. " chars)")\n            end\n        end\n        local ok, r1, r2 = pcall(_real_load, src, ...)\n        if ok then return r1, r2 else return nil, r2 end\n    end\n    _G.loadstring = _G.load\n    -- Prevent WeAreDev VM from accessing real load via debug library\n    if debug then\n        local _orig_debug_getinfo = debug.getinfo\n        local _orig_debug_getupvalue = debug.getupvalue\n        if _orig_debug_getupvalue then\n            debug.getupvalue = function(...) return nil end\n        end\n        if debug.setupvalue then\n            debug.setupvalue = function(...) return nil end\n        end\n    end\nend\n\n_G.newproxy = function(b)\n    local t = {}\n    if b then setmetatable(t, {__index = function() return nil end}) end\n    return t\nend\n\nlocal api_names = {\n    "game", "workspace", "Instance", "Enum",\n    "Players", "ReplicatedStorage", "ReplicatedFirst",\n    "ServerStorage", "ServerScriptService", "StarterGui",\n    "StarterPlayer", "StarterPack", "StarterCharacterScripts",\n    "Lighting", "Teams", "Chat", "Debris",\n    "TweenService", "RunService", "UserInputService",\n    "HttpService", "MarketplaceService", "CollectionService",\n    "PathfindingService", "SoundService", "TextService",\n    "GuiService", "UserSettings", "CoreGui", "CorePackages",\n    "VirtualUser", "ContentProvider",\n    "DataStoreService", "BadgeService",\n    "UDim", "UDim2", "Color3", "Vector2", "Vector3",\n    "CFrame", "Ray", "Region3", "TweenInfo",\n    "Rect", "Font", "NumberSequence", "ColorSequence",\n    "NumberRange", "RaycastParams", "PhysicalProperties",\n    "task", "coroutine",\n}\n\nfor _, api_name in ipairs(api_names) do\n    _G[api_name] = make_tracer(api_name)\nend\n\n_orig_print("[STUBS_OK]")\n'
+    _TRACER_LUA = 'local _trace = {}\nlocal _trace_n = 0\nlocal _orig_print = print\n\nlocal function safe_tostring(v)\n    if type(v) == "string" then\n        return string.format("%q", v)\n    end\n    if type(v) == "nil" then return "nil" end\n    if type(v) == "boolean" then return tostring(v) end\n    if type(v) == "function" then return "function" end\n    if type(v) == "table" then return "{}" end\n    return tostring(v)\nend\n\nlocal function T(entry)\n    _trace_n = _trace_n + 1\n    _trace[_trace_n] = entry\n    _orig_print("[T]" .. entry)\nend\n\nlocal function traced_print(...)\n    local args = {...}\n    local strs = {}\n    for i, v in ipairs(args) do\n        strs[i] = tostring(v)\n    end\n    local line = table.concat(strs, "\\t")\n    _orig_print("[P]" .. line)\n    local arg_strs = {}\n    for i, v in ipairs(args) do\n        arg_strs[i] = safe_tostring(v)\n    end\n    T("print(" .. table.concat(arg_strs, ", ") .. ")")\nend\n\nlocal function make_chain_tracer(name)\n    local proxy = {}\n    local full_path = name\n    local mt = {\n        __index = function(t, k)\n            local kstr = type(k) == "string" and k or tostring(k)\n            T(full_path .. "." .. kstr)\n            local new_path = full_path .. "." .. kstr\n            return make_chain_tracer(new_path)\n        end,\n        __newindex = function(t, k, v)\n            local kstr = type(k) == "string" and k or tostring(k)\n            local vstr = safe_tostring(v)\n            T(full_path .. "." .. kstr .. " = " .. vstr)\n        end,\n        __call = function(t, ...)\n            local args = {}\n            for i, a in ipairs({...}) do\n                args[i] = safe_tostring(a)\n            end\n            T(full_path .. "(" .. table.concat(args, ", ") .. ")")\n            return make_chain_tracer(full_path .. "()")\n        end,\n        __tostring = function(t) return full_path end,\n        __concat = function(a, b) return "" end,\n        __len = function(t) return 0 end,\n        __add = function(a, b) return 0 end,\n        __sub = function(a, b) return 0 end,\n        __mul = function(a, b) return 0 end,\n        __div = function(a, b) return 0 end,\n        __mod = function(a, b) return 0 end,\n        __pow = function(a, b) return 0 end,\n        __eq = function(a, b) return false end,\n        __lt = function(a, b) return false end,\n        __le = function(a, b) return false end,\n    }\n    setmetatable(proxy, mt)\n    return proxy\nend\nlocal make_tracer = make_chain_tracer\n\n_G.print = traced_print\n_G.warn = traced_print\n_G.info = traced_print\n\nif not _G.getfenv then _G.getfenv = function(l) return _G end end\nif not _G.getgenv then _G.getgenv = function() return _G end end\nif not _G.setfenv then _G.setfenv = function() end end\nif not _G.unpack then _G.unpack = table.unpack end\nif not _G.select then _G.select = select end\nif not _G.unpack then _G.unpack = table.unpack end\n\nlocal _orig_pcall = pcall\n_G.pcall = function(f, ...)\n    local results = {_orig_pcall(f, ...)}\n    local ok = results[1]\n    if not ok then\n        local err = tostring(results[2])\n        if not err:find("pow", 1, true) then\n            T("-- pcall error: " .. err)\n        end\n    end\n    return table.unpack(results)\nend\n\nlocal _orig_xpcall = xpcall\n_G.xpcall = function(f, handler, ...)\n    local results = {_orig_xpcall(f, handler, ...)}\n    local ok = results[1]\n    if not ok then\n        T("-- xpcall error: " .. tostring(results[2]))\n    end\n    return table.unpack(results)\nend\n\nlocal _orig_load = loadstring or load\nif _orig_load then\n    local _real_load = _orig_load\n    _G.load = function(src, ...)\n        if src == nil then return nil, "cannot load nil" end\n        if type(src) ~= "string" and type(src) ~= "function" then\n            local ok, r1, r2 = pcall(_real_load, src, ...)\n            if ok then return r1, r2 else return nil, r2 end\n        end\n        if type(src) == "string" and #src > 5 then\n            local first100 = src:sub(1, 100)\n            if not first100:find("bit32", 1, true) and not first100:find("4294967296", 1, true) then\n                T("-- loadstring called (" .. #src .. " chars)")\n            end\n        end\n        local ok, r1, r2 = pcall(_real_load, src, ...)\n        if ok then return r1, r2 else return nil, r2 end\n    end\n    _G.loadstring = _G.load\n    -- Prevent WeAreDev VM from accessing real load via debug library\n    if debug then\n        local _orig_debug_getinfo = debug.getinfo\n        local _orig_debug_getupvalue = debug.getupvalue\n        if _orig_debug_getupvalue then\n            debug.getupvalue = function(...) return nil end\n        end\n        if debug.setupvalue then\n            debug.setupvalue = function(...) return nil end\n        end\n    end\nend\n\n_G.newproxy = function(b)\n    local t = {}\n    if b then setmetatable(t, {__index = function() return nil end}) end\n    return t\nend\n\nlocal api_names = {\n    "game", "workspace", "Instance", "Enum",\n    "Players", "ReplicatedStorage", "ReplicatedFirst",\n    "ServerStorage", "ServerScriptService", "StarterGui",\n    "StarterPlayer", "StarterPack", "StarterCharacterScripts",\n    "Lighting", "Teams", "Chat", "Debris",\n    "TweenService", "RunService", "UserInputService",\n    "HttpService", "MarketplaceService", "CollectionService",\n    "PathfindingService", "SoundService", "TextService",\n    "GuiService", "UserSettings", "CoreGui", "CorePackages",\n    "VirtualUser", "ContentProvider",\n    "DataStoreService", "BadgeService",\n    "UDim", "UDim2", "Color3", "Vector2", "Vector3",\n    "CFrame", "Ray", "Region3", "TweenInfo",\n    "Rect", "Font", "NumberSequence", "ColorSequence",\n    "NumberRange", "RaycastParams", "PhysicalProperties",\n    "task", "coroutine",\n}\n\nfor _, api_name in ipairs(api_names) do\n    _G[api_name] = make_tracer(api_name)\nend\n\n_orig_print("[STUBS_OK]")\n'
 
     @staticmethod
     def _get_tracer_lua() -> str:
@@ -963,7 +974,7 @@ class WeAreDevDeobfuscator:
 
             result = subprocess.run(
                 [sys.executable, runner_file, obf_file],
-                capture_output=True, text=True, timeout=15
+                capture_output=True, text=True, timeout=25
             )
         except subprocess.TimeoutExpired:
             result = subprocess.CompletedProcess([], 1, stdout='', stderr='timeout')
@@ -990,18 +1001,10 @@ class WeAreDevDeobfuscator:
 
     @staticmethod
     def _reconstruct_source(trace: List[str], prints: List[str]) -> str:
-        """Convert trace entries to reconstructed Lua source.
-
-        Strategy:
-        - Remove entries that are prefixes of other entries (intermediate indexing)
-        - Keep leaf entries (final calls, assignments, standalone operations)
-        - Deduplicate
-        - Separate comments from code
-        """
-        if not trace:
+        """Convert trace entries to clean Lua source (v5: clean syntax)."""
+        if not trace and not prints:
             return ''
 
-        # Separate comments and code
         comments = []
         code_entries = []
         for entry in trace:
@@ -1010,7 +1013,7 @@ class WeAreDevDeobfuscator:
             else:
                 code_entries.append(entry)
 
-        # Remove prefix entries (intermediate indexing kept for final operations)
+        # Remove prefix entries (intermediate indexing)
         filtered = []
         for i, entry in enumerate(code_entries):
             is_prefix = any(
@@ -1020,7 +1023,7 @@ class WeAreDevDeobfuscator:
             if not is_prefix:
                 filtered.append(entry)
 
-        # Deduplicate while preserving order
+        # Deduplicate
         seen = set()
         unique = []
         for entry in filtered:
@@ -1028,30 +1031,34 @@ class WeAreDevDeobfuscator:
                 seen.add(entry)
                 unique.append(entry)
 
-        # Build output
-        lines = []
+        # Convert tracer format to clean Lua syntax
+        clean_lines = []
+        for entry in unique:
+            clean = entry
+            # .Method({}, "arg") -> :Method("arg")
+            clean = re.sub(r'\.([A-Za-z_][A-Za-z0-9_]*)\(\{\}, "([^"]*)"\)', r':\1("\2")', clean)
+            clean = re.sub(r'\.([A-Za-z_][A-Za-z0-9_]*)\(\{\}\)', r':\1()', clean)
+            # Remove stray empty table args
+            clean = re.sub(r'\(\{\},\s*', '(', clean)
+            clean = re.sub(r',\s*\{\}\)', ')', clean)
+            clean_lines.append(clean)
 
-        # Comments (skip noisy anti-tamper pow errors)
+        # Non-tamper comments
         for c in comments:
             if 'pow' not in c and 'Tamper' not in c.lower():
-                lines.append(c)
+                clean_lines.append(c)
 
-        # Code (skip prints already captured by trace)
+        # Prints
         has_print_in_trace = any(e.startswith('print(') for e in unique)
-        for entry in unique:
-            lines.append(entry)
-
-        # Add prints only if trace didn't capture them
         if not has_print_in_trace:
             for p in prints:
                 try:
                     float(p)
-                    stmt = f'print({p})'
+                    clean_lines.append(f'print({p})')
                 except ValueError:
-                    stmt = f'print("{p}")'
-                lines.append(stmt)
+                    clean_lines.append(f'print({repr(p)})')
 
-        return '\n'.join(lines)
+        return '\n'.join(clean_lines)
 
     @staticmethod
     def _generate_output(obf: str, P_decoded: Dict[int, str],
@@ -1061,129 +1068,45 @@ class WeAreDevDeobfuscator:
                          verbose: bool, m_offset: int = 5713,
                          accessor_name: str = 'M',
                          resolved_cff: str = '') -> str:
-        """Generate the final deobfuscated output."""
-        lines = []
-        lines.append('-- Deobfuscated by Hunter Gay - Lua Deobfuscation Toolkit v4.0')
-        lines.append('-- WeAreDev Obfuscator v1.0.0')
-        lines.append('')
+        """Generate clean deobfuscated output (v5: source only, no junk)."""
+        has_reconstructed = reconstructed and reconstructed.strip() and len(reconstructed.strip()) > 0
 
-        # Section 1: Reconstructed source (MOST IMPORTANT - put it first)
-        has_reconstructed = reconstructed and len(reconstructed.strip()) > 0
+        # If we have reconstructed source, output it CLEAN — no obfuscator junk
         if has_reconstructed:
-            lines.append('-- ============================================')
-            lines.append('-- RECONSTRUCTED SOURCE CODE')
-            lines.append('-- ============================================')
-            lines.append(reconstructed)
-            lines.append('')
+            return reconstructed
 
-        # Section 2: Execution output
-        if prints:
-            lines.append('-- ============================================')
-            lines.append('-- SCRIPT OUTPUT')
-            lines.append('-- ============================================')
-            for p in prints:
-                lines.append(f'-- output: {p}')
-            lines.append('')
+        # No reconstructed source — build from trace + prints
+        clean_parts = []
+        for entry in trace:
+            if entry.startswith('--'):
+                continue
+            clean = entry
+            clean = re.sub(r'\.([A-Za-z_][A-Za-z0-9_]*)\(\{\}, "([^"]*)"\)', r':\1("\2")', clean)
+            clean = re.sub(r'\.([A-Za-z_][A-Za-z0-9_]*)\(\{\}\)', r':\1()', clean)
+            clean_parts.append(clean)
 
-        # Section 3: Errors
+        for p in prints:
+            try:
+                float(p)
+                clean_parts.append(f'print({p})')
+            except ValueError:
+                clean_parts.append(f'print({repr(p)})')
+
+        if clean_parts:
+            return '\n'.join(clean_parts)
+
+        # Fallback: resolved CFF
+        if resolved_cff and len(resolved_cff) > 10:
+            literal_count = resolved_cff.count('"')
+            if literal_count > 50:
+                return resolved_cff
+
         non_tamper = [e for e in errors if 'pow' not in e.lower() and 'Tamper' not in e]
-        tamper_count = len(errors) - len(non_tamper)
-
         if non_tamper:
-            lines.append('-- ============================================')
-            lines.append('-- RUNTIME ERRORS')
-            lines.append('-- ============================================')
-            for e in non_tamper[:10]:
-                lines.append(f'--   {e[:200]}')
-            lines.append('')
+            return f'-- Deobfuscation incomplete: {non_tamper[0][:150]}'
+        return f'-- Deobfuscation incomplete ({len(P_decoded)} strings decoded, no source recovered)'
 
-        if tamper_count > 0 and verbose:
-            lines.append(f'-- Note: {tamper_count} anti-tamper check(s) failed (expected)')
-            lines.append('')
 
-        # Section 4: Decoded string constants
-        lines.append('-- ============================================')
-        lines.append('-- DECODED STRING CONSTANTS (P-table)')
-        lines.append('-- ============================================')
-
-        meaningful = {}
-        for idx in sorted(P_decoded.keys()):
-            s = P_decoded[idx]
-            if not s or not s.strip():
-                continue
-            if re.match(r'^[A-Za-z0-9]{8,20}$', s):
-                continue
-            meaningful[idx] = s
-
-        if meaningful:
-            for idx, s in sorted(meaningful.items()):
-                lines.append(f'--   [{idx}] = {repr(s)}')
-            lines.append('')
-
-        # Section 5: M() reference map
-        lines.append('-- ============================================')
-        lines.append(f'-- {accessor_name}() FUNCTION REFERENCE MAP')
-        lines.append(f'-- {accessor_name}(x) = P[x - {m_offset}]')
-        lines.append('-- ============================================')
-
-        if string_map:
-            for val in sorted(string_map.keys()):
-                s = string_map[val]
-                if s and not re.match(r'^[A-Za-z0-9]{8,20}$', s):
-                    lines.append(f'--   {accessor_name}({val}) = {repr(s)}')
-            lines.append('')
-
-        # Section 6: Behavioral analysis
-        lines.append('-- ============================================')
-        lines.append('-- SCRIPT BEHAVIOR ANALYSIS')
-        lines.append('-- ============================================')
-
-        all_str = ' '.join(str(v) for v in meaningful.values())
-        behaviors = []
-
-        checks = [
-            ('print' in all_str, 'Outputs text via print()'),
-            ('pcall' in all_str, 'Uses pcall for error handling'),
-            ('setmetatable' in all_str and '__index' in all_str, 'OOP-style tables with metatables'),
-            ('__metatable' in all_str, 'Protects metatable access (anti-inspect)'),
-            ('gsub' in all_str or 'gmatch' in all_str, 'Pattern matching (gsub/gmatch)'),
-            ('random' in all_str, 'Uses math.random'),
-            ('byte' in all_str or 'char' in all_str, 'String byte-level processing'),
-            ('concat' in all_str, 'Uses table.concat'),
-            ('tonumber' in all_str, 'String to number conversion'),
-            ('floor' in all_str, 'Uses math.floor'),
-            ('error' in all_str and 'Tamper' in all_str, 'Anti-tamper protection'),
-            (len(trace) > 5, f'Makes {len(trace)}+ API/operations calls'),
-        ]
-
-        for cond, desc in checks:
-            if cond:
-                behaviors.append(desc)
-
-        if behaviors:
-            for b in behaviors:
-                lines.append(f'--   [+] {b}')
-        else:
-            lines.append('--   (no specific behavior identified)')
-        lines.append('')
-
-        # Resolved CFF (v4)
-        lines.append('-- ============================================')
-        lines.append('-- RESOLVED CFF (v4: accessor calls replaced with string literals)')
-        lines.append('-- ============================================')
-        if resolved_cff:
-            max_chars = 5000
-            if len(resolved_cff) > max_chars:
-                lines.append(f'-- (showing first {max_chars} of {len(resolved_cff)} chars)')
-                lines.append(resolved_cff[:max_chars] + chr(10) + '-- ... (truncated)')
-            else:
-                lines.append(resolved_cff)
-        else:
-            lines.append('-- (v4 CFF resolution produced no output; v3 fallback not available in static mode)')
-
-        lines.append('')
-
-        return '\n'.join(lines)
 class GenericVMDeobfuscator:
     """Generic VM-based: try execution and capture output."""
 
@@ -1192,12 +1115,25 @@ class GenericVMDeobfuscator:
         if engine.available:
             if verbose:
                 print("  [*] Attempting VM execution...")
-            ok, source, prints = engine.execute_and_capture(code, timeout=20)
-            if source and len(source) > 5:
+            ok, source, prints = engine.execute_and_capture(code, timeout=30)
+            if source and len(source) > 5 and "syntax error" not in str(source).lower():
                 return source, {"method": "VM execution (loadstring capture)"}
             if ok and prints:
                 recovered = SourceReconstructor.from_prints(prints)
                 return recovered, {"method": "VM execution (print trace)", "print_count": len(prints)}
+            # v5: try paren repair on syntax error
+            if not ok and source and ("syntax error" in str(source).lower() or "expected" in str(source).lower()):
+                if verbose:
+                    print(f"  [*] Syntax error, attempting paren repair...")
+                open_p = code.count("(") - code.count(")")
+                if 0 < open_p < 30:
+                    repaired = code + ")" * open_p
+                    ok2, src2, pr2 = engine.execute_and_capture(repaired, timeout=30)
+                    if src2 and len(src2) > 5:
+                        return src2, {"method": "VM execution (repaired)"}
+                    if ok2 and pr2:
+                        recovered = SourceReconstructor.from_prints(pr2)
+                        return recovered, {"method": "VM execution (repaired + prints)"}
 
         while_loops = code.count("while true do")
         cff = len(re.findall(r'=\s*\d+\s*\+\s*\w+', code))
@@ -1328,106 +1264,6 @@ class LuaDeobfuscator:
 
 # ============================================================
 # CLI
-# ============================================================
-
-def format_output(obf_name: str, source: str, meta: dict, verbose: bool) -> str:
-    """Format the final output."""
-    lines = [f"-- Deobfuscated by Hunter Gay - Lua Deobfuscation Toolkit v4.0"]
-    lines.append(f"-- Obfuscator: {obf_name}")
-    for k, v in meta.items():
-        if k not in ("error", "prints"):
-            lines.append(f"-- {k}: {v}")
-    lines.append("")
-    lines.append(source)
-    return "\n".join(lines)
-
-
-def main():
-    args = sys.argv[1:]
-
-    if not args or "-h" in args or "--help" in args:
-        print("Lua Deobfuscation Toolkit v4.0")
-        print("By Hunter Gay - Hunter Team Community\n")
-        print(f"Usage: python {sys.argv[0]} <input.lua> [options]")
-        print("")
-        print("Options:")
-        print("  -o <file>     Output file (default: stdout)")
-        print("  --detect-only  Only detect obfuscator type")
-        print("  -v, --verbose  Verbose output")
-        print("")
-        print("Supported: IronBrew2, WAN OBFUSCATE, MoonSec V3,")
-        print("            Clyde Protection v2, AstroProtect 2.2,")
-        print("            WeAreDev v1.0.0 (FULL), Base64+Compress,")
-        print("            Generic VM")
-        sys.exit(0)
-
-    input_file = None
-    output_file = None
-    detect_only = False
-    verbose = False
-
-    i = 0
-    while i < len(args):
-        if args[i] == "-o" and i + 1 < len(args):
-            output_file = args[i + 1]
-            i += 2
-            continue
-        if args[i].startswith("--detect"):
-            detect_only = True
-            i += 1
-            continue
-        if args[i] in ("-v", "--verbose"):
-            verbose = True
-            i += 1
-            continue
-        if args[i].startswith("-"):
-            i += 1
-            continue
-        if input_file is None:
-            input_file = args[i]
-        i += 1
-
-    if not input_file:
-        print("Error: No input file specified")
-        sys.exit(1)
-
-    if not os.path.exists(input_file):
-        print(f"Error: File not found: {input_file}")
-        sys.exit(1)
-
-    deobf = LuaDeobfuscator(verbose=verbose)
-
-    if detect_only:
-        detected = deobf.detect_only(input_file)
-        print(f"Detected: {detected}")
-        return
-
-    obf_name, source, meta = deobf.deobfuscate_file(input_file)
-
-    output = format_output(obf_name, source, meta, verbose)
-
-    if output_file:
-        os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
-        with open(output_file, "w", encoding="utf-8") as f:
-            f.write(output)
-        if verbose:
-            print(f"[+] Saved: {output_file}")
-    else:
-        print(output)
-
-    if verbose:
-        print(f"\n[+] Obfuscator: {obf_name}")
-        for k, v in meta.items():
-            print(f"    {k}: {v}")
-
-
-# ============================================================
-#                    DISCORD BOT WRAPPER
-# ============================================================
-# Commands:
-#   .l <link>          -- deobfuscate a Lua file from a URL
-#   .l  (with file)    -- deobfuscate the attachment
-#   .help              -- show usage
 
 import threading as _threading
 import discord
@@ -1437,62 +1273,31 @@ import aiohttp
 
 TOKEN = os.environ.get("DISCORD_TOKEN")
 COMMAND_PREFIX = "."
-DISCORD_MSG_LIMIT = 1900  # leave headroom under the 2000 char hard limit
-MAX_FETCH_BYTES = 5 * 1024 * 1024  # 5 MB safety cap for link downloads
-
-
-# ------------------------------------------------------------
-# Keep-alive web server
-# ------------------------------------------------------------
-# Render (and most host-a-web-service platforms) expect the process to
-# bind a port and answer HTTP requests, or it marks the service as down
-# and restarts/kills it. The Discord bot itself doesn't need HTTP for
-# anything -- this Flask app exists purely to keep Render happy.
+DISCORD_MSG_LIMIT = 1900
+MAX_FETCH_BYTES = 5 * 1024 * 1024
 
 keep_alive_app = Flask(__name__)
-
 
 @keep_alive_app.route("/")
 def _health():
     return "Bot is running."
 
-
 def _run_keep_alive():
     port = int(os.environ.get("PORT", 8080))
     keep_alive_app.run(host="0.0.0.0", port=port)
 
-
 def start_keep_alive():
     _threading.Thread(target=_run_keep_alive, daemon=True).start()
 
-
 intents = discord.Intents.default()
 intents.message_content = True
-
 bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents)
 
-# Deobfuscator is stateful (loads a Lua VM once), reuse a single instance
 deobfuscator = LuaDeobfuscator(verbose=False)
 
 
-# ------------------------------------------------------------
-# Comment stripping
-# ------------------------------------------------------------
-
 def strip_lua_comments(source: str) -> str:
-    """
-    Best-effort removal of Lua comments from source text.
-
-    Handles:
-      - Block comments: --[[ ... ]], --[=[ ... ]=], etc.
-      - Line comments: -- until end of line
-
-    Caveat: this is a plain-text pass, not a real Lua tokenizer, so a
-    literal "--" inside a string literal could in rare cases get cut.
-    Good enough for cleaning toolkit output / typical scripts.
-    """
     source = re.sub(r"--\[(=*)\[.*?\]\1\]", "", source, flags=re.DOTALL)
-
     cleaned_lines = []
     for line in source.split("\n"):
         idx = line.find("--")
@@ -1501,21 +1306,12 @@ def strip_lua_comments(source: str) -> str:
             if before.count('"') % 2 == 0 and before.count("'") % 2 == 0:
                 line = before.rstrip()
         cleaned_lines.append(line)
-
     result = "\n".join(cleaned_lines)
     result = re.sub(r"\n{3,}", "\n\n", result)
     return result.strip()
 
 
-# ------------------------------------------------------------
-# Fetch helpers
-# ------------------------------------------------------------
-
 async def _fetch_source(ctx: commands.Context, link: Optional[str]):
-    """
-    Returns (filename, code_text) or raises ValueError with a user-facing
-    message on failure.
-    """
     if ctx.message.attachments:
         attachment = ctx.message.attachments[0]
         if not attachment.filename.lower().endswith((".lua", ".txt")):
@@ -1539,10 +1335,6 @@ async def _fetch_source(ctx: commands.Context, link: Optional[str]):
     raise ValueError("Attach a `.lua`/`.txt` file, or give a link: `.l <link>`")
 
 
-# ------------------------------------------------------------
-# Bot events / commands
-# ------------------------------------------------------------
-
 @bot.event
 async def on_ready():
     print(f"[+] Logged in as {bot.user} (id={bot.user.id})")
@@ -1550,8 +1342,6 @@ async def on_ready():
 
 @bot.command(name="l")
 async def l_cmd(ctx: commands.Context, link: Optional[str] = None):
-    """.l <link> or .l with a file attached -- deobfuscate and strip comments."""
-
     try:
         filename, code = await _fetch_source(ctx, link)
     except ValueError as e:
@@ -1604,9 +1394,8 @@ bot.remove_command('help')
 
 @bot.command(name="help")
 async def help_cmd(ctx: commands.Context):
-    """.help -- show usage."""
     embed = discord.Embed(
-        title="Lua Deobfuscator Bot",
+        title="Lua Deobfuscator",
         description="Commands:",
         color=0x5865F2,
     )
@@ -1622,7 +1411,7 @@ async def help_cmd(ctx: commands.Context):
     )
     embed.add_field(
         name="Supported obfuscators",
-        value="WeAreDevs, IronBrew, MoonSec, AstroProtect, WAN, Clyde, generic VM-based/CFF obfuscators.",
+        value="WeAreDev, IronBrew2, WAN OBFUSCATE, MoonSec V3, Clyde, AstroProtect, Luraph, Kraken, Fusion, Avalanche, Tempest, Novoline, KAVVM, Yustream, Base64+Compress, Generic VM-based.",
         inline=False,
     )
     embed.set_footer(text="Comments are stripped from the recovered source automatically.")
