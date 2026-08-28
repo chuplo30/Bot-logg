@@ -15,166 +15,6 @@ from typing import Optional, List, Dict, Tuple, Any
 
 
 # ============================================================
-# Embedded WeAreDev tracer Lua environment (formerly tracer_env.lua)
-# ============================================================
-_TRACER_ENV_LUA = r'''
-local _trace = {}
-local _trace_n = 0
-local _orig_print = print
-
-local function safe_tostring(v)
-    if type(v) == "string" then
-        return string.format("%q", v)
-    end
-    if type(v) == "nil" then return "nil" end
-    if type(v) == "boolean" then return tostring(v) end
-    if type(v) == "function" then return "function" end
-    if type(v) == "table" then return "{}" end
-    return tostring(v)
-end
-
-local function T(entry)
-    _trace_n = _trace_n + 1
-    _trace[_trace_n] = entry
-    _orig_print("[T]" .. entry)
-end
-
-local function traced_print(...)
-    local args = {...}
-    local strs = {}
-    for i, v in ipairs(args) do
-        strs[i] = tostring(v)
-    end
-    local line = table.concat(strs, "\t")
-    _orig_print("[P]" .. line)
-    local arg_strs = {}
-    for i, v in ipairs(args) do
-        arg_strs[i] = safe_tostring(v)
-    end
-    T("print(" .. table.concat(arg_strs, ", ") .. ")")
-end
-
-local function make_tracer(name)
-    local proxy = {}
-    local mt = {
-        __index = function(t, k)
-            local kstr = type(k) == "string" and k or tostring(k)
-            T(name .. "." .. kstr)
-            return nil
-        end,
-        __newindex = function(t, k, v)
-            local kstr = type(k) == "string" and k or tostring(k)
-            local vstr = safe_tostring(v)
-            T(name .. "." .. kstr .. " = " .. vstr)
-        end,
-        __call = function(t, ...)
-            local args = {}
-            for i, a in ipairs({...}) do
-                args[i] = safe_tostring(a)
-            end
-            T(name .. "(" .. table.concat(args, ", ") .. ")")
-            return nil
-        end,
-        __tostring = function(t) return name end,
-        __concat = function(a, b) return nil end,
-        __len = function(t) return 0 end,
-        __add = function(a, b) return nil end,
-        __sub = function(a, b) return nil end,
-        __mul = function(a, b) return nil end,
-        __div = function(a, b) return nil end,
-        __mod = function(a, b) return nil end,
-        __pow = function(a, b) return nil end,
-        __eq = function(a, b) return false end,
-        __lt = function(a, b) return false end,
-        __le = function(a, b) return false end,
-    }
-    setmetatable(proxy, mt)
-    return proxy
-end
-
-_G.print = traced_print
-_G.warn = traced_print
-_G.info = traced_print
-
-if not _G.getfenv then _G.getfenv = function(l) return _G end end
-if not _G.getgenv then _G.getgenv = function() return _G end end
-if not _G.setfenv then _G.setfenv = function() end end
-if not _G.unpack then _G.unpack = table.unpack end
-
-local _orig_pcall = pcall
-_G.pcall = function(f, ...)
-    local results = {_orig_pcall(f, ...)}
-    local ok = results[1]
-    if not ok then
-        local err = tostring(results[2])
-        if not err:find("pow", 1, true) then
-            T("-- pcall error: " .. err)
-        end
-    end
-    return table.unpack(results)
-end
-
-local _orig_xpcall = xpcall
-_G.xpcall = function(f, handler, ...)
-    local results = {_orig_xpcall(f, handler, ...)}
-    local ok = results[1]
-    if not ok then
-        T("-- xpcall error: " .. tostring(results[2]))
-    end
-    return table.unpack(results)
-end
-
-local _orig_load = loadstring or load
-if _orig_load then
-    local _real_load = _orig_load
-    _G.load = function(src, ...)
-        if src == nil then return nil, nil end
-        if type(src) ~= "string" and type(src) ~= "function" then return _real_load(src, ...) end
-        if type(src) == "string" and #src > 5 then
-            local first100 = src:sub(1, 100)
-            if not first100:find("bit32", 1, true) and not first100:find("4294967296", 1, true) then
-                T("-- loadstring called (" .. #src .. " chars)")
-            end
-        end
-        return _real_load(src, ...)
-    end
-    _G.loadstring = _G.load
-end
-
-_G.newproxy = function(b)
-    local t = {}
-    if b then setmetatable(t, {__index = function() return nil end}) end
-    return t
-end
-
-local api_names = {
-    "game", "workspace", "Instance", "Enum",
-    "Players", "ReplicatedStorage", "ReplicatedFirst",
-    "ServerStorage", "ServerScriptService", "StarterGui",
-    "StarterPlayer", "StarterPack", "StarterCharacterScripts",
-    "Lighting", "Teams", "Chat", "Debris",
-    "TweenService", "RunService", "UserInputService",
-    "HttpService", "MarketplaceService", "CollectionService",
-    "PathfindingService", "SoundService", "TextService",
-    "GuiService", "UserSettings", "CoreGui", "CorePackages",
-    "VirtualUser", "ContentProvider",
-    "DataStoreService", "BadgeService",
-    "UDim", "UDim2", "Color3", "Vector2", "Vector3",
-    "CFrame", "Ray", "Region3", "TweenInfo",
-    "Rect", "Font", "NumberSequence", "ColorSequence",
-    "NumberRange", "RaycastParams", "PhysicalProperties",
-    "task", "coroutine",
-}
-
-for _, api_name in ipairs(api_names) do
-    _G[api_name] = make_tracer(api_name)
-end
-
-_orig_print("[STUBS_OK]")
-'''
-
-
-# ============================================================
 # Utility
 # ============================================================
 
@@ -300,6 +140,7 @@ _G.warn = _G.print
 _G.info = _G.print
 
 _G.load = function(src, ...)
+    if src == nil then return nil, "nil" end
     load_count = load_count + 1
     if load_count > 1 and type(src) == "string" and #src > 10 then
         local first300 = src:sub(1, 300)
@@ -308,7 +149,8 @@ _G.load = function(src, ...)
             captured_loads[#captured_loads+1] = src
         end
     end
-    return _orig_load(src, ...)
+    local ok, r1, r2 = pcall(_orig_load, src, ...)
+    if ok then return r1, r2 else return nil, r2 end
 end
 if not _G.loadstring then
     _G.loadstring = _G.load
@@ -711,7 +553,7 @@ class WeAreDevDeobfuscator:
     and method invocation - not just print() output.
     """
 
-    M_OFFSET = 472584 - 466871  # 5713
+    M_OFFSET = 472584 - 466871  # 5713 — fallback default
 
     @staticmethod
     def deobfuscate(code: str, engine: LuaEngine, verbose: bool) -> Optional[Tuple[str, dict]]:
@@ -720,6 +562,11 @@ class WeAreDevDeobfuscator:
 
         import subprocess
         obf = re.sub(r'^--\[\[.*?\]\]\s*', '', code)
+
+        # Extract M() offset dynamically from the obfuscated code
+        m_offset, accessor_name = WeAreDevDeobfuscator._extract_m_offset(obf)
+        if verbose:
+            print(f"  [*] Extracted {accessor_name}() offset: {m_offset}")
 
         # Phase 1: Decode P-table
         if verbose:
@@ -730,12 +577,12 @@ class WeAreDevDeobfuscator:
                 print("  [!] Failed to decode P-table")
             return None
 
-        string_map = WeAreDevDeobfuscator._build_string_map(obf, P_decoded)
+        string_map = WeAreDevDeobfuscator._build_string_map(obf, P_decoded, m_offset, accessor_name)
         real_strings = {k: v for k, v in string_map.items()
                         if v and not re.match(r'^[A-Za-z0-9]{8,20}$', v)}
 
         if verbose:
-            print(f"  [*] P-table: {len(P_decoded)} entries, {len(real_strings)} meaningful strings")
+            print(f"  [*] P-table: {len(P_decoded)} entries, {len(real_strings)} meaningful strings ({accessor_name}() offset={m_offset})")
 
         # Phase 2: Execute VM with tracing
         if verbose:
@@ -751,7 +598,7 @@ class WeAreDevDeobfuscator:
 
         # Phase 4: Generate output
         source = WeAreDevDeobfuscator._generate_output(
-            obf, P_decoded, string_map, prints, trace, errors, reconstructed, verbose)
+            obf, P_decoded, string_map, prints, trace, errors, reconstructed, verbose, m_offset, accessor_name)
 
         meta = {
             "method": "P-table decode + traced VM execution + source reconstruction",
@@ -767,14 +614,40 @@ class WeAreDevDeobfuscator:
     @staticmethod
     def _decode_p_table(obf: str, engine: LuaEngine) -> Optional[Dict[int, str]]:
         """Decode P-table by injecting print before CFF return."""
-        inject_marker = 'return(function(P,l,g,d,Q,z,H,O,c,j,x,f,R,U,k,a,v,K,C,E)'
-        inject_pos = obf.find(inject_marker)
-        if inject_pos == -1:
+        inject_match = re.search(r'return\(function\([a-zA-Z,]+\)', obf)
+        if not inject_match:
             return None
-
-        inject = 'do \n  for i=1,#P do \n    if type(P[i])=="string" and #P[i]>0 then \n      local hex="" \n      for ci=1,#P[i] do hex=hex..string.format("%02x",P[i]:byte(ci)) end \n      print("PDEC|"..i.."|"..hex) \n    else \n      print("PDEC|"..i.."|") \n    end \n  end \n  print("PDEC_DONE") \n  return nil \nend \n'
+        inject_pos = inject_match.start()
+        inject_end = inject_match.end()
+        # Get the first parameter name (P-table variable)
+        param_str = obf[inject_match.start()+16:inject_match.end()-1]
+        p_var = param_str.split(',')[0].strip() if param_str else 'P'
+        inject = ('do \n  for i=1,#' + p_var + ' do \n'
+            '    if type(' + p_var + '[i])=="string" and #' + p_var + '[i]>0 then \n'
+            '      local hex="" \n'
+            '      for ci=1,#' + p_var + '[i] do hex=hex..string.format("%02x",' + p_var + '[i]:byte(ci)) end \n'
+            '      print("PDEC|"..i.."|"..hex) \n'
+            '    else \n'
+            '      print("PDEC|"..i.."|") \n'
+            '    end \n'
+            '  end \n'
+            '  print("PDEC_DONE") \n'
+            '  return nil \n'
+            'end \n')
 
         modified = obf[:inject_pos] + inject + obf[inject_pos:]
+
+        # Prepend a load hook to prevent nil-crash during P-table decode
+        load_guard = ('local _wad_real_load = loadstring or load\n'
+            'if _wad_real_load then\n'
+            '    load = function(src, ...)\n'
+            '        if src == nil then return nil, "nil" end\n'
+            '        local ok, r1, r2 = pcall(_wad_real_load, src, ...)\n'
+            '        if ok then return r1, r2 else return nil, r2 end\n'
+            '    end\n'
+            '    loadstring = load\n'
+            'end\n')
+        modified = load_guard + modified
 
         captured = []
         engine.lua.globals()['print'] = lambda *args: captured.append(' '.join(str(a) for a in args))
@@ -807,22 +680,48 @@ class WeAreDevDeobfuscator:
         return P_decoded if P_decoded else None
 
     @staticmethod
-    def _build_string_map(obf: str, P_decoded: Dict[int, str]) -> Dict[int, str]:
-        """Build M(value) -> decoded string mapping."""
+    def _extract_m_offset(obf: str) -> Tuple[int, str]:
+        """Extract the M() accessor offset and function name dynamically.
+
+        WeAreDev code has a pattern like:
+          local function N(N) return y[N-(-35298+69912)] end
+        or:
+          local function C(C) return r[C+(830462+-799744)] end
+        Returns (offset, accessor_function_name).
+        """
+        m = re.search(r'local function (\w+)\(\w+\)return \w+\[\w+([+-])\(?([^)]+?)\)?\]end', obf)
+        if not m:
+            m = re.search(r'local function (\w+)\(\w+\)return \w+\[\w+([+-])([^\]]+)\]end', obf)
+        if m:
+            func_name = m.group(1)
+            sign = m.group(2)
+            expr = m.group(3)
+            val = eval_arith(expr)
+            if val is not None:
+                offset = val if sign == '-' else -val
+                return offset, func_name
+        return WeAreDevDeobfuscator.M_OFFSET, 'M'
+
+    @staticmethod
+    def _build_string_map(obf: str, P_decoded: Dict[int, str], m_offset: int, accessor_name: str = 'M') -> Dict[int, str]:
+        """Build accessor(value) -> decoded string mapping."""
         string_map = {}
-        m_pattern = r'M\((-?\d+\+-?\d+)\)'
+        m_pattern = accessor_name + r'\((-?\d+[+-]?-?\d+)\)'
         for m in re.finditer(m_pattern, obf):
             val = eval_arith(m.group(1))
             if val is not None:
-                idx = val - WeAreDevDeobfuscator.M_OFFSET
+                idx = val - m_offset
                 if idx in P_decoded:
                     string_map[val] = P_decoded[idx]
         return string_map
 
+    # Embedded tracer Lua environment (self-contained - no external files needed)
+    _TRACER_LUA = 'local _trace = {}\nlocal _trace_n = 0\nlocal _orig_print = print\n\nlocal function safe_tostring(v)\n    if type(v) == "string" then\n        return string.format("%q", v)\n    end\n    if type(v) == "nil" then return "nil" end\n    if type(v) == "boolean" then return tostring(v) end\n    if type(v) == "function" then return "function" end\n    if type(v) == "table" then return "{}" end\n    return tostring(v)\nend\n\nlocal function T(entry)\n    _trace_n = _trace_n + 1\n    _trace[_trace_n] = entry\n    _orig_print("[T]" .. entry)\nend\n\nlocal function traced_print(...)\n    local args = {...}\n    local strs = {}\n    for i, v in ipairs(args) do\n        strs[i] = tostring(v)\n    end\n    local line = table.concat(strs, "\\t")\n    _orig_print("[P]" .. line)\n    local arg_strs = {}\n    for i, v in ipairs(args) do\n        arg_strs[i] = safe_tostring(v)\n    end\n    T("print(" .. table.concat(arg_strs, ", ") .. ")")\nend\n\nlocal function make_tracer(name)\n    local proxy = {}\n    local mt = {\n        __index = function(t, k)\n            local kstr = type(k) == "string" and k or tostring(k)\n            T(name .. "." .. kstr)\n            return nil\n        end,\n        __newindex = function(t, k, v)\n            local kstr = type(k) == "string" and k or tostring(k)\n            local vstr = safe_tostring(v)\n            T(name .. "." .. kstr .. " = " .. vstr)\n        end,\n        __call = function(t, ...)\n            local args = {}\n            for i, a in ipairs({...}) do\n                args[i] = safe_tostring(a)\n            end\n            T(name .. "(" .. table.concat(args, ", ") .. ")")\n            return nil\n        end,\n        __tostring = function(t) return name end,\n        __concat = function(a, b) return nil end,\n        __len = function(t) return 0 end,\n        __add = function(a, b) return nil end,\n        __sub = function(a, b) return nil end,\n        __mul = function(a, b) return nil end,\n        __div = function(a, b) return nil end,\n        __mod = function(a, b) return nil end,\n        __pow = function(a, b) return nil end,\n        __eq = function(a, b) return false end,\n        __lt = function(a, b) return false end,\n        __le = function(a, b) return false end,\n    }\n    setmetatable(proxy, mt)\n    return proxy\nend\n\n_G.print = traced_print\n_G.warn = traced_print\n_G.info = traced_print\n\nif not _G.getfenv then _G.getfenv = function(l) return _G end end\nif not _G.getgenv then _G.getgenv = function() return _G end end\nif not _G.setfenv then _G.setfenv = function() end end\nif not _G.unpack then _G.unpack = table.unpack end\n\nlocal _orig_pcall = pcall\n_G.pcall = function(f, ...)\n    local results = {_orig_pcall(f, ...)}\n    local ok = results[1]\n    if not ok then\n        local err = tostring(results[2])\n        if not err:find("pow", 1, true) then\n            T("-- pcall error: " .. err)\n        end\n    end\n    return table.unpack(results)\nend\n\nlocal _orig_xpcall = xpcall\n_G.xpcall = function(f, handler, ...)\n    local results = {_orig_xpcall(f, handler, ...)}\n    local ok = results[1]\n    if not ok then\n        T("-- xpcall error: " .. tostring(results[2]))\n    end\n    return table.unpack(results)\nend\n\nlocal _orig_load = loadstring or load\nif _orig_load then\n    local _real_load = _orig_load\n    _G.load = function(src, ...)\n        if src == nil then return nil, "cannot load nil" end\n        if type(src) ~= "string" and type(src) ~= "function" then\n            local ok, r1, r2 = pcall(_real_load, src, ...)\n            if ok then return r1, r2 else return nil, r2 end\n        end\n        if type(src) == "string" and #src > 5 then\n            local first100 = src:sub(1, 100)\n            if not first100:find("bit32", 1, true) and not first100:find("4294967296", 1, true) then\n                T("-- loadstring called (" .. #src .. " chars)")\n            end\n        end\n        local ok, r1, r2 = pcall(_real_load, src, ...)\n        if ok then return r1, r2 else return nil, r2 end\n    end\n    _G.loadstring = _G.load\n    -- Prevent WeAreDev VM from accessing real load via debug library\n    if debug then\n        local _orig_debug_getinfo = debug.getinfo\n        local _orig_debug_getupvalue = debug.getupvalue\n        if _orig_debug_getupvalue then\n            debug.getupvalue = function(...) return nil end\n        end\n        if debug.setupvalue then\n            debug.setupvalue = function(...) return nil end\n        end\n    end\nend\n\n_G.newproxy = function(b)\n    local t = {}\n    if b then setmetatable(t, {__index = function() return nil end}) end\n    return t\nend\n\nlocal api_names = {\n    "game", "workspace", "Instance", "Enum",\n    "Players", "ReplicatedStorage", "ReplicatedFirst",\n    "ServerStorage", "ServerScriptService", "StarterGui",\n    "StarterPlayer", "StarterPack", "StarterCharacterScripts",\n    "Lighting", "Teams", "Chat", "Debris",\n    "TweenService", "RunService", "UserInputService",\n    "HttpService", "MarketplaceService", "CollectionService",\n    "PathfindingService", "SoundService", "TextService",\n    "GuiService", "UserSettings", "CoreGui", "CorePackages",\n    "VirtualUser", "ContentProvider",\n    "DataStoreService", "BadgeService",\n    "UDim", "UDim2", "Color3", "Vector2", "Vector3",\n    "CFrame", "Ray", "Region3", "TweenInfo",\n    "Rect", "Font", "NumberSequence", "ColorSequence",\n    "NumberRange", "RaycastParams", "PhysicalProperties",\n    "task", "coroutine",\n}\n\nfor _, api_name in ipairs(api_names) do\n    _G[api_name] = make_tracer(api_name)\nend\n\n_orig_print("[STUBS_OK]")\n'
+
     @staticmethod
     def _get_tracer_lua() -> str:
-        """Return the embedded tracer Lua environment (no external file needed)."""
-        return _TRACER_ENV_LUA
+        """Return the embedded tracer Lua environment."""
+        return WeAreDevDeobfuscator._TRACER_LUA
 
 
     @staticmethod
@@ -953,10 +852,11 @@ class WeAreDevDeobfuscator:
                          string_map: Dict[int, str],
                          prints: List[str], trace: List[str],
                          errors: List[str], reconstructed: str,
-                         verbose: bool) -> str:
+                         verbose: bool, m_offset: int = 5713,
+                         accessor_name: str = 'M') -> str:
         """Generate the final deobfuscated output."""
         lines = []
-        lines.append('-- Deobfuscated by Hunter Gay - Lua Deobfuscation Toolkit v3.0')
+        lines.append('-- Deobfuscated by Hunter Gay - Lua Deobfuscation Toolkit v3.1')
         lines.append('-- WeAreDev Obfuscator v1.0.0')
         lines.append('')
 
@@ -1016,7 +916,7 @@ class WeAreDevDeobfuscator:
         # Section 5: M() reference map
         lines.append('-- ============================================')
         lines.append('-- M() FUNCTION REFERENCE MAP')
-        lines.append(f'-- M(x) = P[x - {WeAreDevDeobfuscator.M_OFFSET}]')
+        lines.append(f'-- {accessor_name}(x) = P[x - {m_offset}]')
         lines.append('-- ============================================')
 
         if string_map:
@@ -1076,7 +976,7 @@ class WeAreDevDeobfuscator:
                     return repr(s)
             return m.group(0)
 
-        simplified = re.sub(r'M\((-?\d+\+-?\d+)\)', replace_m, simplified)
+        simplified = re.sub(accessor_name + r'\((-?\d+[+-]?-?\d+)\)', replace_m, simplified)
         simplified = re.sub(r'=(\s*)(-?\d+\+-?\d+)', lambda m: '=' + m.group(1) + str(eval_arith(m.group(2)) or m.group(2)), simplified)
 
         if len(simplified) > 2000:
@@ -1237,7 +1137,7 @@ class LuaDeobfuscator:
 
 def format_output(obf_name: str, source: str, meta: dict, verbose: bool) -> str:
     """Format the final output."""
-    lines = [f"-- Deobfuscated by Hunter Gay - Lua Deobfuscation Toolkit v3.0"]
+    lines = [f"-- Deobfuscated by Hunter Gay - Lua Deobfuscation Toolkit v3.1"]
     lines.append(f"-- Obfuscator: {obf_name}")
     for k, v in meta.items():
         if k not in ("error", "prints"):
@@ -1251,7 +1151,7 @@ def main():
     args = sys.argv[1:]
 
     if not args or "-h" in args or "--help" in args:
-        print("Lua Deobfuscation Toolkit v3.0")
+        print("Lua Deobfuscation Toolkit v3.1")
         print("By Hunter Gay - Hunter Team Community\n")
         print(f"Usage: python {sys.argv[0]} <input.lua> [options]")
         print("")
