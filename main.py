@@ -1,3 +1,12 @@
+#!/usr/bin/env python3
+"""
+Lua Deobfuscation Toolkit v3.0 - Bot Discord + Flask Server
+By Hunter Gay - Hunter Team Community
+
+Gộp từ lua_deobf_toolkit_v3.py + wearedev_vm_runner.py
+Chạy trên Render với Flask health check.
+Lệnh .log → trả file log hoặc link download.
+"""
 
 import re
 import sys
@@ -7,11 +16,24 @@ import base64
 import time
 import json
 import math
+import uuid
 import tempfile
-import multiprocessing
+import threading
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple, Any
+from datetime import datetime, timezone, timedelta
 
+from flask import Flask, request, jsonify, send_file, abort
+
+app = Flask(__name__)
+
+# ============================================================
+# Config
+# ============================================================
+LOG_DIR = os.environ.get("LOG_DIR", "/tmp/deobf_logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+DISCORD _TOKEN = os.environ.get("DISCORD_TOKEN")
+TZ = timezone(timedelta(hours=7))  # UTC+7
 
 # ============================================================
 # Utility
@@ -47,6 +69,193 @@ def decode_decimal_escapes(s: str) -> str:
 
 
 # ============================================================
+# WeAreDev VM Tracer (inline từ wearedev_vm_runner.py)
+# ============================================================
+
+TRACER_LUA = r'''
+local _trace = {}
+local _trace_n = 0
+local _orig_print = print
+
+local function safe_tostring(v)
+    if type(v) == "string" then
+        return "\"" .. v:gsub("\"", "\\\"") .. "\""
+    end
+    if type(v) == "nil" then return "nil" end
+    if type(v) == "boolean" then return tostring(v) end
+    if type(v) == "function" then return "function" end
+    if type(v) == "table" then return "{}" end
+    return tostring(v)
+end
+
+local function T(entry)
+    _trace_n = _trace_n + 1
+    _trace[_trace_n] = entry
+    _orig_print("[T]" .. entry)
+end
+
+local function traced_print(...)
+    local args = {...}
+    local strs = {}
+    for i, v in ipairs(args) do
+        strs[i] = tostring(v)
+    end
+    local line = table.concat(strs, "\t")
+    _orig_print("[P]" .. line)
+    local arg_strs = {}
+    for i, v in ipairs(args) do
+        arg_strs[i] = safe_tostring(v)
+    end
+    T("print(" .. table.concat(arg_strs, ", ") .. ")")
+end
+
+local function make_tracer(name)
+    local proxy = {}
+    local mt = {
+        __index = function(t, k)
+            local kstr = type(k) == "string" and k or tostring(k)
+            T(name .. "." .. kstr)
+            return nil
+        end,
+        __newindex = function(t, k, v)
+            local kstr = type(k) == "string" and k or tostring(k)
+            local vstr = safe_tostring(v)
+            T(name .. "." .. kstr .. " = " .. vstr)
+        end,
+        __call = function(t, ...)
+            local args = {}
+            for i, a in ipairs({...}) do
+                args[i] = safe_tostring(a)
+            end
+            T(name .. "(" .. table.concat(args, ", ") .. ")")
+            return nil
+        end,
+        __tostring = function(t) return name end,
+        __concat = function(a, b) return nil end,
+        __len = function(t) return 0 end,
+        __add = function(a, b) return nil end,
+        __sub = function(a, b) return nil end,
+        __mul = function(a, b) return nil end,
+        __div = function(a, b) return nil end,
+        __mod = function(a, b) return nil end,
+        __pow = function(a, b) return nil end,
+        __eq = function(a, b) return false end,
+        __lt = function(a, b) return false end,
+        __le = function(a, b) return false end,
+    }
+    setmetatable(proxy, mt)
+    return proxy
+end
+
+_G.print = traced_print
+_G.warn = traced_print
+_G.info = traced_print
+
+if not _G.getfenv then _G.getfenv = function(l) return _G end end
+if not _G.getgenv then _G.getgenv = function() return _G end end
+if not _G.setfenv then _G.setfenv = function() end end
+if not _G.unpack then _G.unpack = table.unpack end
+
+local _orig_pcall = pcall
+_G.pcall = function(f, ...)
+    local results = {_orig_pcall(f, ...)}
+    local ok = results[1]
+    if not ok then
+        local err = tostring(results[2])
+        if not err:find("pow", 1, true) then
+            T("-- pcall error: " .. err)
+        end
+    end
+    return table.unpack(results)
+end
+
+local _orig_xpcall = xpcall
+_G.xpcall = function(f, handler, ...)
+    local results = {_orig_xpcall(f, handler, ...)}
+    local ok = results[1]
+    if not ok then
+        T("-- xpcall error: " .. tostring(results[2]))
+    end
+    return table.unpack(results)
+end
+
+local _orig_load = loadstring or load
+if _orig_load then
+    local _real_load = _orig_load
+    _G.load = function(src, ...)
+        if type(src) == "string" and #src > 5 then
+            local first100 = src:sub(1, 100)
+            if not first100:find("bit32", 1, true) and not first100:find("4294967296", 1, true) then
+                T("-- loadstring called (" .. #src .. " chars)")
+            end
+        end
+        return _real_load(src, ...)
+    end
+    _G.loadstring = _G.load
+end
+
+_G.newproxy = function(b)
+    local t = {}
+    if b then setmetatable(t, {__index = function() return nil end}) end
+    return t
+end
+
+local api_names = {
+    "game", "workspace", "Instance", "Enum",
+    "Players", "ReplicatedStorage", "ReplicatedFirst",
+    "ServerStorage", "ServerScriptService", "StarterGui",
+    "StarterPlayer", "StarterPack", "StarterCharacterScripts",
+    "Lighting", "Teams", "Chat", "Debris",
+    "TweenService", "RunService", "UserInputService",
+    "HttpService", "MarketplaceService", "CollectionService",
+    "PathfindingService", "SoundService", "TextService",
+    "GuiService", "UserSettings", "CoreGui", "CorePackages",
+    "VirtualUser", "ContentProvider",
+    "DataStoreService", "BadgeService",
+    "UDim", "UDim2", "Color3", "Vector2", "Vector3",
+    "CFrame", "Ray", "Region3", "TweenInfo",
+    "Rect", "Font", "NumberSequence", "ColorSequence",
+    "NumberRange", "RaycastParams", "PhysicalProperties",
+    "task", "coroutine",
+}
+
+for _, api_name in ipairs(api_names) do
+    _G[api_name] = make_tracer(api_name)
+end
+
+_orig_print("[STUBS_OK]")
+'''
+
+
+def run_vm_tracer(code: str, timeout: float = 15) -> Tuple[List[str], List[str], List[str]]:
+    """Chạy VM tracer inline (không cần subprocess). Returns (prints, trace, errors)."""
+    from lupa import LuaRuntime
+    lua = LuaRuntime(unpack_returned_tuples=True)
+    prints, trace, errors = [], [], []
+
+    try:
+        def capture_print(*args):
+            line = '\t'.join(str(a) for a in args)
+            if line.startswith('[P]'):
+                prints.append(line[3:])
+            elif line.startswith('[T]'):
+                trace.append(line[3:])
+            elif line.startswith('[EX]'):
+                errors.append(line[4:])
+
+        lua.globals()['print'] = capture_print
+        lua.execute(TRACER_LUA + '\n' + code)
+        prints.append('[DONE]')
+    except Exception as e:
+        err_str = str(e)
+        if len(err_str) > 500:
+            err_str = err_str[:500] + '...'
+        errors.append(err_str)
+
+    return prints, trace, errors
+
+
+# ============================================================
 # Lua Execution Engine (lupa-based)
 # ============================================================
 
@@ -64,7 +273,6 @@ class LuaEngine:
         except ImportError:
             self.available = False
             print("[!] lupa not installed. VM execution disabled.")
-            print("    Install: pip install lupa")
 
     @classmethod
     def get(cls):
@@ -109,7 +317,7 @@ end
 
 print("_SETUP_OK")
 """
-        result = self.lua.execute(setup_lua)
+        self.lua.execute(setup_lua)
 
     def execute_and_capture(self, code: str, timeout: float = 20) -> Tuple[bool, str, List[str]]:
         """
@@ -545,9 +753,6 @@ class WeAreDevDeobfuscator:
     - Phase 2: Run VM with tracing proxies (captures ALL operations)
     - Phase 3: Reconstruct Lua source from execution trace
     - Phase 4: Generate comprehensive output
-
-    v3 Improvement: Tracing proxies capture every API call, property access,
-    and method invocation - not just print() output.
     """
 
     M_OFFSET = 472584 - 466871  # 5713
@@ -557,7 +762,6 @@ class WeAreDevDeobfuscator:
         if not engine.available:
             return None
 
-        import subprocess
         obf = re.sub(r'^--\[\[.*?\]\]\s*', '', code)
 
         # Phase 1: Decode P-table
@@ -576,11 +780,11 @@ class WeAreDevDeobfuscator:
         if verbose:
             print(f"  [*] P-table: {len(P_decoded)} entries, {len(real_strings)} meaningful strings")
 
-        # Phase 2: Execute VM with tracing
+        # Phase 2: Execute VM with tracing (inline, không subprocess)
         if verbose:
             print("  [*] Phase 2: Executing VM with full tracing (15s timeout)...")
 
-        prints, trace, errors = WeAreDevDeobfuscator._execute_vm_traced(obf)
+        prints, trace, errors = run_vm_tracer(obf)
 
         if verbose:
             print(f"  [*] Captured: {len(prints)} prints, {len(trace)} trace entries, {len(errors)} errors")
@@ -659,56 +863,11 @@ class WeAreDevDeobfuscator:
         return string_map
 
     @staticmethod
-    def _execute_vm_traced(obf: str) -> Tuple[List[str], List[str], List[str]]:
-        """Execute VM via subprocess with tracing. Returns (prints, trace, errors)."""
-        import subprocess
-
-        obf_file = tempfile.mktemp(suffix='.lua', prefix='wearedev_v3_')
-        with open(obf_file, 'w') as f:
-            f.write(obf)
-
-        runner_script = os.path.join(os.path.dirname(__file__), 'wearedev_vm_runner.py')
-        try:
-            result = subprocess.run(
-                [sys.executable, runner_script, obf_file],
-                capture_output=True, text=True, timeout=15
-            )
-        except subprocess.TimeoutExpired:
-            result = subprocess.CompletedProcess([], 1, stdout='', stderr='timeout')
-        except Exception:
-            result = subprocess.CompletedProcess([], 1, stdout='', stderr='error')
-        finally:
-            if os.path.exists(obf_file):
-                os.unlink(obf_file)
-
-        prints, trace, errors = [], [], []
-        for line in result.stdout.split('\n'):
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith('[P]'):
-                prints.append(line[3:])
-            elif line.startswith('[T]'):
-                trace.append(line[3:])
-            elif line.startswith('[EX]'):
-                errors.append(line[4:])
-
-        return prints, trace, errors
-
-    @staticmethod
     def _reconstruct_source(trace: List[str], prints: List[str]) -> str:
-        """Convert trace entries to reconstructed Lua source.
-
-        Strategy:
-        - Remove entries that are prefixes of other entries (intermediate indexing)
-        - Keep leaf entries (final calls, assignments, standalone operations)
-        - Deduplicate
-        - Separate comments from code
-        """
+        """Convert trace entries to reconstructed Lua source."""
         if not trace:
             return ''
 
-        # Separate comments and code
         comments = []
         code_entries = []
         for entry in trace:
@@ -717,7 +876,6 @@ class WeAreDevDeobfuscator:
             else:
                 code_entries.append(entry)
 
-        # Remove prefix entries (intermediate indexing kept for final operations)
         filtered = []
         for i, entry in enumerate(code_entries):
             is_prefix = any(
@@ -727,7 +885,6 @@ class WeAreDevDeobfuscator:
             if not is_prefix:
                 filtered.append(entry)
 
-        # Deduplicate while preserving order
         seen = set()
         unique = []
         for entry in filtered:
@@ -735,20 +892,16 @@ class WeAreDevDeobfuscator:
                 seen.add(entry)
                 unique.append(entry)
 
-        # Build output
         lines = []
 
-        # Comments (skip noisy anti-tamper pow errors)
         for c in comments:
             if 'pow' not in c and 'Tamper' not in c.lower():
                 lines.append(c)
 
-        # Code (skip prints already captured by trace)
         has_print_in_trace = any(e.startswith('print(') for e in unique)
         for entry in unique:
             lines.append(entry)
 
-        # Add prints only if trace didn't capture them
         if not has_print_in_trace:
             for p in prints:
                 try:
@@ -772,7 +925,6 @@ class WeAreDevDeobfuscator:
         lines.append('-- WeAreDev Obfuscator v1.0.0')
         lines.append('')
 
-        # Section 1: Reconstructed source (MOST IMPORTANT - put it first)
         has_reconstructed = reconstructed and len(reconstructed.strip()) > 0
         if has_reconstructed:
             lines.append('-- ============================================')
@@ -781,7 +933,6 @@ class WeAreDevDeobfuscator:
             lines.append(reconstructed)
             lines.append('')
 
-        # Section 2: Execution output
         if prints:
             lines.append('-- ============================================')
             lines.append('-- SCRIPT OUTPUT')
@@ -790,7 +941,6 @@ class WeAreDevDeobfuscator:
                 lines.append(f'-- output: {p}')
             lines.append('')
 
-        # Section 3: Errors
         non_tamper = [e for e in errors if 'pow' not in e.lower() and 'Tamper' not in e]
         tamper_count = len(errors) - len(non_tamper)
 
@@ -806,7 +956,6 @@ class WeAreDevDeobfuscator:
             lines.append(f'-- Note: {tamper_count} anti-tamper check(s) failed (expected)')
             lines.append('')
 
-        # Section 4: Decoded string constants
         lines.append('-- ============================================')
         lines.append('-- DECODED STRING CONSTANTS (P-table)')
         lines.append('-- ============================================')
@@ -825,7 +974,6 @@ class WeAreDevDeobfuscator:
                 lines.append(f'--   [{idx}] = {repr(s)}')
             lines.append('')
 
-        # Section 5: M() reference map
         lines.append('-- ============================================')
         lines.append('-- M() FUNCTION REFERENCE MAP')
         lines.append(f'-- M(x) = P[x - {WeAreDevDeobfuscator.M_OFFSET}]')
@@ -838,7 +986,6 @@ class WeAreDevDeobfuscator:
                     lines.append(f'--   M({val}) = {repr(s)}')
             lines.append('')
 
-        # Section 6: Behavioral analysis
         lines.append('-- ============================================')
         lines.append('-- SCRIPT BEHAVIOR ANALYSIS')
         lines.append('-- ============================================')
@@ -872,7 +1019,6 @@ class WeAreDevDeobfuscator:
             lines.append('--   (no specific behavior identified)')
         lines.append('')
 
-        # Section 7: Simplified CFF (M() resolved, truncated)
         lines.append('-- ============================================')
         lines.append('-- SIMPLIFIED CFF (M() calls resolved to strings)')
         lines.append('-- ============================================')
@@ -901,6 +1047,8 @@ class WeAreDevDeobfuscator:
         lines.append('')
 
         return '\n'.join(lines)
+
+
 class GenericVMDeobfuscator:
     """Generic VM-based: try execution and capture output."""
 
@@ -975,17 +1123,8 @@ class LuaDeobfuscator:
         self.verbose = verbose
         self.engine = LuaEngine.get()
 
-    def deobfuscate_file(self, filepath: str) -> Tuple[str, str, dict]:
-        """Deobfuscate file -> (obfuscator_name, source, metadata)"""
-        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
-            code = f.read()
-        return self.deobfuscate(code, filepath)
-
-    def deobfuscate(self, code: str, name: str = "input") -> Tuple[str, str, dict]:
-        """
-        Deobfuscate Lua code.
-        Returns (obfuscator_name, recovered_source, metadata)
-        """
+    def deobfuscate_code(self, code: str, name: str = "input") -> Tuple[str, str, dict]:
+        """Deobfuscate Lua code string. Returns (obfuscator_name, source, metadata)"""
         detected = ObfuscatorDetector.detect(code)
         if self.verbose:
             print(f"[*] File: {name}")
@@ -1037,15 +1176,17 @@ class LuaDeobfuscator:
 
         return obf_name, source, meta
 
+    def deobfuscate_file(self, filepath: str) -> Tuple[str, str, dict]:
+        """Deobfuscate file -> (obfuscator_name, source, metadata)"""
+        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+            code = f.read()
+        return self.deobfuscate_code(code, filepath)
+
     def detect_only(self, filepath: str) -> str:
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
             code = f.read()
         return ObfuscatorDetector.detect(code) or "Unknown/Clear text"
 
-
-# ============================================================
-# CLI
-# ============================================================
 
 def format_output(obf_name: str, source: str, meta: dict, verbose: bool) -> str:
     """Format the final output."""
@@ -1059,245 +1200,270 @@ def format_output(obf_name: str, source: str, meta: dict, verbose: bool) -> str:
     return "\n".join(lines)
 
 
-def main():
-    args = sys.argv[1:]
+# ============================================================
+# Logging System cho lệnh .log
+# ============================================================
 
-    if not args or "-h" in args or "--help" in args:
-        print("Lua Deobfuscation Toolkit v3.0")
-        print("By Hunter Gay - Hunter Team Community\n")
-        print(f"Usage: python {sys.argv[0]} <input.lua> [options]")
-        print("")
-        print("Options:")
-        print("  -o <file>     Output file (default: stdout)")
-        print("  --detect-only  Only detect obfuscator type")
-        print("  -v, --verbose  Verbose output")
-        print("")
-        print("Supported: IronBrew2, WAN OBFUSCATE, MoonSec V3,")
-        print("            Clyde Protection v2, AstroProtect 2.2,")
-        print("            WeAreDev v1.0.0 (FULL), Base64+Compress,")
-        print("            Generic VM")
-        sys.exit(0)
+def write_log(user_id: str, username: str, action: str, result: str, meta: dict = None) -> str:
+    """Ghi log vào file và trả về file path."""
+    log_id = uuid.uuid4().hex[:8]
+    timestamp = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+    log_filename = f"log_{timestamp.replace(':', '-').replace(' ', '_')}_{log_id}.txt"
+    log_path = os.path.join(LOG_DIR, log_filename)
 
-    input_file = None
-    output_file = None
-    detect_only = False
-    verbose = False
+    lines = [
+        f"=== Lua Deobfuscation Log ===",
+        f"Time: {timestamp} (UTC+7)",
+        f"User: {username} ({user_id})",
+        f"Action: {action}",
+        f"",
+    ]
 
-    i = 0
-    while i < len(args):
-        if args[i] == "-o" and i + 1 < len(args):
-            output_file = args[i + 1]
-            i += 2
-            continue
-        if args[i].startswith("--detect"):
-            detect_only = True
-            i += 1
-            continue
-        if args[i] in ("-v", "--verbose"):
-            verbose = True
-            i += 1
-            continue
-        if args[i].startswith("-"):
-            i += 1
-            continue
-        if input_file is None:
-            input_file = args[i]
-        i += 1
+    if meta:
+        lines.append("--- Metadata ---")
+        for k, v in meta.items():
+            if k not in ("error", "prints"):
+                lines.append(f"  {k}: {v}")
+        lines.append("")
 
-    if not input_file:
-        print("Error: No input file specified")
-        sys.exit(1)
+    lines.append("--- Result ---")
+    lines.append(result)
 
-    if not os.path.exists(input_file):
-        print(f"Error: File not found: {input_file}")
-        sys.exit(1)
+    content = "\n".join(lines)
+    with open(log_path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    return log_path
+
+
+def list_logs(limit: int = 20) -> List[dict]:
+    """Liệt kê các file log gần nhất."""
+    logs = []
+    if not os.path.exists(LOG_DIR):
+        return logs
+    for f in sorted(os.listdir(LOG_DIR), reverse=True)[:limit]:
+        fp = os.path.join(LOG_DIR, f)
+        if os.path.isfile(fp):
+            stat = os.stat(fp)
+            logs.append({
+                "filename": f,
+                "size": stat.st_size,
+                "created": datetime.fromtimestamp(stat.st_ctime, TZ).strftime("%Y-%m-%d %H:%M:%S"),
+            })
+    return logs
+
+
+# ============================================================
+# Flask Routes
+# ============================================================
+
+@app.route("/", methods=["GET"])
+def health_check():
+    return jsonify({
+        "status": "online",
+        "service": "Lua Deobfuscation Toolkit v3.0",
+        "author": "Hunter Gay - Hunter Team Community",
+    })
+
+
+@app.route("/deobf", methods=["POST"])
+def api_deobfuscate():
+    """API endpoint: POST /deobf với raw Lua code trong body."""
+    data = request.get_json(force=True, silent=True) or {}
+    code = data.get("code", "") or request.get_data(as_text=True)
+    verbose = data.get("verbose", False)
+    user_id = data.get("user_id", "api")
+    username = data.get("username", "api_user")
+
+    if not code or len(code.strip()) < 10:
+        return jsonify({"error": "No Lua code provided (min 10 chars)"}), 400
 
     deobf = LuaDeobfuscator(verbose=verbose)
-
-    if detect_only:
-        detected = deobf.detect_only(input_file)
-        print(f"Detected: {detected}")
-        return
-
-    obf_name, source, meta = deobf.deobfuscate_file(input_file)
-
+    obf_name, source, meta = deobf.deobfuscate_code(code)
     output = format_output(obf_name, source, meta, verbose)
 
-    if output_file:
-        os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
-        with open(output_file, "w", encoding="utf-8") as f:
-            f.write(output)
-        if verbose:
-            print(f"[+] Saved: {output_file}")
-    else:
-        print(output)
+    # Ghi log
+    log_path = write_log(user_id, username, "api_deobf", output, meta)
 
-    if verbose:
-        print(f"\n[+] Obfuscator: {obf_name}")
-        for k, v in meta.items():
-            print(f"    {k}: {v}")
+    return jsonify({
+        "obfuscator": obf_name,
+        "metadata": {k: v for k, v in meta.items() if k != "error"},
+        "source": source,
+        "log_file": log_path,
+    })
 
+
+@app.route("/deobf/upload", methods=["POST"])
+def api_deobf_upload():
+    """API endpoint: POST /deobf/upload với file .lua upload."""
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+
+    f = request.files["file"]
+    if not f.filename:
+        return jsonify({"error": "Empty filename"}), 400
+
+    code = f.read().decode("utf-8", errors="replace")
+    verbose = request.form.get("verbose", "false").lower() == "true"
+    user_id = request.form.get("user_id", "api")
+    username = request.form.get("username", "api_user")
+
+    deobf = LuaDeobfuscator(verbose=verbose)
+    obf_name, source, meta = deobf.deobfuscate_code(code, f.filename)
+    output = format_output(obf_name, source, meta, verbose)
+
+    log_path = write_log(user_id, username, f"upload:{f.filename}", output, meta)
+
+    return jsonify({
+        "obfuscator": obf_name,
+        "filename": f.filename,
+        "metadata": {k: v for k, v in meta.items() if k != "error"},
+        "source": source,
+        "log_file": log_path,
+    })
+
+
+@app.route("/log", methods=["GET"])
+def api_list_logs():
+    """Lệnh .log - Liệt kê log hoặc trả file/log cụ thể."""
+    log_id = request.args.get("id", "")
+    download = request.args.get("download", "").lower() == "true"
+
+    if log_id:
+        # Tìm log theo ID (prefix match)
+        for f in os.listdir(LOG_DIR):
+            if log_id in f:
+                fp = os.path.join(LOG_DIR, f)
+                if download:
+                    return send_file(fp, as_attachment=True, download_name=f)
+                with open(fp, "r", encoding="utf-8") as fh:
+                    content = fh.read()
+                return jsonify({"filename": f, "content": content})
+        return jsonify({"error": f"Log '{log_id}' not found"}), 404
+
+    # Liệt kê tất cả logs
+    logs = list_logs()
+    return jsonify({"logs": logs, "total": len(logs)})
+
+
+@app.route("/log/latest", methods=["GET"])
+def api_latest_log():
+    """Lấy log mới nhất."""
+    logs = list_logs(limit=1)
+    if not logs:
+        return jsonify({"error": "No logs found"}), 404
+
+    fp = os.path.join(LOG_DIR, logs[0]["filename"])
+    download = request.args.get("download", "").lower() == "true"
+    if download:
+        return send_file(fp, as_attachment=True, download_name=logs[0]["filename"])
+    with open(fp, "r", encoding="utf-8") as f:
+        content = f.read()
+    return jsonify({"filename": logs[0]["filename"], "content": content})
+
+
+@app.route("/log/<filename>", methods=["GET"])
+def api_get_log(filename: str):
+    """Download log theo filename."""
+    fp = os.path.join(LOG_DIR, filename)
+    if not os.path.exists(fp):
+        return jsonify({"error": "Log not found"}), 404
+    return send_file(fp, as_attachment=True, download_name=filename)
 
 
 # ============================================================
+# Discord Bot (chạy trong thread riêng nếu có token)
 # ============================================================
-#                    DISCORD BOT WRAPPER
-# ============================================================
-# ============================================================
-"""
-Command:
-  .log   (attach a .lua/.txt file to the message)
 
-Behavior:
-  - Downloads the attached file
-  - Runs it through LuaDeobfuscator (defined above in this same file)
-  - Strips comments (-- line comments and --[[ ]] block comments,
-    including the toolkit's own header comments) from the recovered source
-  - Replies with the cleaned source, as a code block if short enough,
-    otherwise as a .lua file attachment
-"""
-
-import threading as _threading
-import discord
-from discord.ext import commands
-from flask import Flask
-
-TOKEN = os.environ.get("DISCORD_TOKEN")
-COMMAND_PREFIX = "."
-DISCORD_MSG_LIMIT = 1900  # leave headroom under the 2000 char hard limit
-
-
-# ------------------------------------------------------------
-# Keep-alive web server
-# ------------------------------------------------------------
-# Render (and most host-a-web-service platforms) expect the process to
-# bind a port and answer HTTP requests, or it marks the service as down
-# and restarts/kills it. The Discord bot itself doesn't need HTTP for
-# anything -- this Flask app exists purely to keep Render happy.
-
-keep_alive_app = Flask(__name__)
-
-
-@keep_alive_app.route("/")
-def _health():
-    return "Bot is running."
-
-
-def _run_keep_alive():
-    port = int(os.environ.get("PORT", 8080))
-    keep_alive_app.run(host="0.0.0.0", port=port)
-
-
-def start_keep_alive():
-    _threading.Thread(target=_run_keep_alive, daemon=True).start()
-
-
-intents = discord.Intents.default()
-intents.message_content = True
-
-bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents)
-
-# Deobfuscator is stateful (loads a Lua VM once), reuse a single instance
-deobfuscator = LuaDeobfuscator(verbose=False)
-
-
-# ------------------------------------------------------------
-# Comment stripping
-# ------------------------------------------------------------
-
-def strip_lua_comments(source: str) -> str:
-    """
-    Best-effort removal of Lua comments from source text.
-
-    Handles:
-      - Block comments: --[[ ... ]], --[=[ ... ]=], etc.
-      - Line comments: -- until end of line
-
-    Caveat: this is a plain-text pass, not a real Lua tokenizer, so a
-    literal "--" inside a string literal could in rare cases get cut.
-    Good enough for cleaning toolkit output / typical scripts.
-    """
-    source = re.sub(r"--\[(=*)\[.*?\]\1\]", "", source, flags=re.DOTALL)
-
-    cleaned_lines = []
-    for line in source.split("\n"):
-        idx = line.find("--")
-        if idx != -1:
-            before = line[:idx]
-            if before.count('"') % 2 == 0 and before.count("'") % 2 == 0:
-                line = before.rstrip()
-        cleaned_lines.append(line)
-
-    result = "\n".join(cleaned_lines)
-    result = re.sub(r"\n{3,}", "\n\n", result)
-    return result.strip()
-
-
-# ------------------------------------------------------------
-# Bot events / commands
-# ------------------------------------------------------------
-
-@bot.event
-async def on_ready():
-    print(f"[+] Logged in as {bot.user} (id={bot.user.id})")
-
-
-@bot.command(name="log")
-async def log_cmd(ctx: commands.Context):
-    """.log -- attach a .lua/.txt file to deobfuscate it and strip comments."""
-
-    if not ctx.message.attachments:
-        await ctx.reply("Attach a `.lua` or `.txt` file with the command.")
+def run_discord_bot():
+    """Chạy Discord bot trong thread riêng."""
+    if not BOT_TOKEN:
+        print("[Bot] No DISCORD_BOT_TOKEN set, skipping bot startup.")
         return
-
-    attachment = ctx.message.attachments[0]
-    if not attachment.filename.lower().endswith((".lua", ".txt")):
-        await ctx.reply("File must be `.lua` or `.txt`.")
-        return
-
-    status_msg = await ctx.reply(f"Deobfuscating `{attachment.filename}`...")
 
     try:
-        raw_bytes = await attachment.read()
-        code = raw_bytes.decode("utf-8", errors="replace")
+        import discord
+    except ImportError:
+        print("[Bot] discord.py not installed. Install: pip install discord.py")
+        return
 
-        obf_name, source, meta = deobfuscator.deobfuscate(code, attachment.filename)
-        cleaned = strip_lua_comments(source)
+    intents = discord.Intents.default()
+    intents.message_content = True
+    bot = discord.Client(intents=intents)
 
-        header = f"Obfuscator detected: **{obf_name}**\n"
+    @bot.event
+    async def on_ready():
+        print(f"[Bot] Logged in as {bot.user}")
 
-        if not cleaned.strip():
-            reason = source.strip() or "No source could be recovered."
-            await status_msg.edit(
-                content=(
-                    f"{header}Nothing left after stripping comments -- "
-                    f"the deobfuscator itself didn't recover real source, "
-                    f"it only returned notes:\n```\n{reason}\n```"
-                    f"{' (lupa not installed -- install it for VM execution)' if not deobfuscator.engine.available else ''}"
-                )
-            )
+    @bot.event
+    async def on_message(message):
+        if message.author.bot:
             return
 
-        if len(cleaned) <= DISCORD_MSG_LIMIT:
-            await status_msg.edit(content=f"{header}```lua\n{cleaned}\n```")
-        else:
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".lua", delete=False, encoding="utf-8"
-            ) as f:
-                f.write(cleaned)
-                tmp_path = f.name
+        content = message.content.strip()
 
-            await status_msg.edit(content=header)
-            await ctx.send(file=discord.File(tmp_path, filename="deobfuscated.lua"))
-            os.remove(tmp_path)
+        # Lệnh .log
+        if content == ".log":
+            logs = list_logs(limit=5)
+            if not logs:
+                await message.reply("Chưa có log nào.")
+                return
 
-    except Exception as e:
-        await status_msg.edit(content=f"Error: `{e}`")
+            lines = ["**Recent Logs:**"]
+            for log in logs:
+                lines.append(f"- `{log['filename']}` ({log['size']} bytes) - {log['created']}")
+            lines.append("")
+            lines.append(f"Dùng `.log <filename>` để xem, `.log download <filename>` để tải file.")
+            await message.reply("\n".join(lines))
+            return
 
+        # .log download <filename>
+        if content.startswith(".log download "):
+            filename = content[14:].strip()
+            fp = os.path.join(LOG_DIR, filename)
+            if not os.path.exists(fp):
+                await message.reply(f"Không tìm thấy log: `{filename}`")
+                return
+            await message.reply(file=discord.File(fp, filename=filename))
+            return
+
+        # .log <filename> hoặc .log <id>
+        if content.startswith(".log "):
+            query = content[5:].strip()
+            found = None
+            for f in os.listdir(LOG_DIR):
+                if query in f:
+                    found = os.path.join(LOG_DIR, f)
+                    break
+
+            if not found:
+                await message.reply(f"Không tìm thấy log: `{query}`")
+                return
+
+            with open(found, "r", encoding="utf-8") as fh:
+                log_content = fh.read()
+
+            if len(log_content) > 2000:
+                # Gửi file nếu quá dài
+                await message.reply(file=discord.File(found, filename=os.path.basename(found)))
+            else:
+                await message.reply(f"```\n{log_content}\n```")
+            return
+
+    bot.run(DISCORD_TOKEN)
+
+
+# ============================================================
+# Main
+# ============================================================
 
 if __name__ == "__main__":
-    if not TOKEN:
-        print("[!] Set DISCORD_TOKEN env var before running.")
-    else:
-        start_keep_alive()
-        bot.run(TOKEN)
+    port = int(os.environ.get("PORT", 5000))
+
+    # Chạy Discord bot trong thread riêng
+    bot_thread = threading.Thread(target=run_discord_bot, daemon=True)
+    bot_thread.start()
+
+    # Chạy Flask
+    print(f"[Server] Starting on port {port}...")
+    app.run(host="0.0.0.0", port=port)
