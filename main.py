@@ -39,7 +39,7 @@ from lua_deobf_toolkit import LuaDeobfuscator
 # Config
 # ============================================================
 
-TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "PASTE_YOUR_BOT_TOKEN_HERE")
+TOKEN = os.environ.get("DISCORD_TOKEN)
 COMMAND_PREFIX = "."
 DISCORD_MSG_LIMIT = 1900  # leave headroom under the 2000 char hard limit
 
