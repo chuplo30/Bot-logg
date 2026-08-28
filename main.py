@@ -897,7 +897,7 @@ class WeAreDevDeobfuscator:
         """
         m = re.search(r'local function (\w+)\(\w+\)return \w+\[\w+([+-])\(?([^)]+?)\)?\]end', obf)
         if not m:
-            m = re.search(r'local function (\w+)\(\w+\)return \w+\[\w+([+-])([^\]]+)\]end', obf)
+            m = re.search(r'local function (\w+)\(\w+\)return \w+\[\w+([+-])(\d+)\]end', obf)
         if m:
             func_name = m.group(1)
             sign = m.group(2)
@@ -1422,24 +1422,12 @@ def main():
 
 
 # ============================================================
-# ============================================================
 #                    DISCORD BOT WRAPPER
 # ============================================================
-# ============================================================
-"""
-Commands:
-  .l <link>          -- deobfuscate a Lua file from a URL
-  .l  (with a file attached to the same message) -- deobfuscate the attachment
-  .help              -- show usage
-
-Behavior:
-  - Downloads the file (attachment or URL)
-  - Runs it through LuaDeobfuscator (defined above in this same file)
-  - Strips comments (-- line comments and --[[ ]] block comments,
-    including the toolkit's own header comments) from the recovered source
-  - Replies with the cleaned source, as a code block if short enough,
-    otherwise as a .lua file attachment
-"""
+# Commands:
+#   .l <link>          -- deobfuscate a Lua file from a URL
+#   .l  (with file)    -- deobfuscate the attachment
+#   .help              -- show usage
 
 import threading as _threading
 import discord
@@ -1600,8 +1588,13 @@ async def l_cmd(ctx: commands.Context, link: Optional[str] = None):
                 tmp_path = f.name
 
             await status_msg.edit(content=header)
-            await ctx.send(file=discord.File(tmp_path, filename="deobfuscated.lua"))
-            os.remove(tmp_path)
+            try:
+                await ctx.send(file=discord.File(tmp_path, filename="deobfuscated.lua"))
+            finally:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
     except Exception as e:
         await status_msg.edit(content=f"Error: `{e}`")
