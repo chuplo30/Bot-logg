@@ -15,26 +15,16 @@ from typing import Optional, List, Dict, Tuple, Any
 
 
 # ============================================================
-# WeAreDev VM runner mode
+# Embedded WeAreDev tracer Lua environment (formerly tracer_env.lua)
 # ============================================================
-# This same file is re-invoked as a SEPARATE subprocess (see
-# WeAreDevDeobfuscator._execute_vm_traced) to run obfuscated Lua in
-# isolation -- so a crash/hang/infinite-loop in the obfuscated script
-# only kills that subprocess, not the Discord bot process.
-# If launched as `python main.py --wearedev-runner <file.lua>`, do ONLY
-# that and exit immediately, before importing discord/flask.
-
-if len(sys.argv) >= 3 and sys.argv[1] == "--wearedev-runner":
-    from lupa import LuaRuntime
-
-    _TRACER_LUA = r'''
+_TRACER_ENV_LUA = r'''
 local _trace = {}
 local _trace_n = 0
 local _orig_print = print
 
 local function safe_tostring(v)
     if type(v) == "string" then
-        return "\"" .. v:gsub("\"", "\\\"") .. "\""
+        return string.format("%q", v)
     end
     if type(v) == "nil" then return "nil" end
     if type(v) == "boolean" then return tostring(v) end
@@ -64,7 +54,6 @@ local function traced_print(...)
     T("print(" .. table.concat(arg_strs, ", ") .. ")")
 end
 
--- Tracing proxy: returns nil but logs all access
 local function make_tracer(name)
     local proxy = {}
     local mt = {
@@ -118,7 +107,6 @@ _G.pcall = function(f, ...)
     local ok = results[1]
     if not ok then
         local err = tostring(results[2])
-        -- Skip noisy anti-tamper pow errors (expected in deobf env)
         if not err:find("pow", 1, true) then
             T("-- pcall error: " .. err)
         end
@@ -140,6 +128,8 @@ local _orig_load = loadstring or load
 if _orig_load then
     local _real_load = _orig_load
     _G.load = function(src, ...)
+        if src == nil then return nil, nil end
+        if type(src) ~= "string" and type(src) ~= "function" then return _real_load(src, ...) end
         if type(src) == "string" and #src > 5 then
             local first100 = src:sub(1, 100)
             if not first100:find("bit32", 1, true) and not first100:find("4294967296", 1, true) then
@@ -182,24 +172,6 @@ end
 
 _orig_print("[STUBS_OK]")
 '''
-
-    def _wearedev_runner_main():
-        obf_path = sys.argv[2]
-        with open(obf_path, 'r', encoding='utf-8', errors='replace') as f:
-            code = f.read()
-
-        lua = LuaRuntime(unpack_returned_tuples=True)
-        try:
-            lua.execute(_TRACER_LUA + '\n' + code)
-            print('[DONE]')
-        except Exception as e:
-            err_str = str(e)
-            if len(err_str) > 500:
-                err_str = err_str[:500] + '...'
-            print(f'[EX]{err_str}')
-
-    _wearedev_runner_main()
-    sys.exit(0)
 
 
 # ============================================================
@@ -848,18 +820,44 @@ class WeAreDevDeobfuscator:
         return string_map
 
     @staticmethod
+    def _get_tracer_lua() -> str:
+        """Return the embedded tracer Lua environment (no external file needed)."""
+        return _TRACER_ENV_LUA
+
+
+    @staticmethod
     def _execute_vm_traced(obf: str) -> Tuple[List[str], List[str], List[str]]:
-        """Execute VM via subprocess with tracing. Returns (prints, trace, errors)."""
+        """Execute VM via subprocess with tracing. Returns (prints, trace, errors).
+
+        Writes a temporary runner script that embeds the tracer Lua environment,
+        so the toolkit is self-contained (no external wearedev_vm_runner.py needed).
+        """
         import subprocess
 
-        obf_file = tempfile.mktemp(suffix='.lua', prefix='wearedev_v3_')
-        with open(obf_file, 'w') as f:
-            f.write(obf)
+        tracer_lua = WeAreDevDeobfuscator._get_tracer_lua()
 
-        runner_script = os.path.abspath(__file__)
+        import base64
+        tracer_b64 = base64.b64encode(tracer_lua.encode('utf-8')).decode('ascii')
+        runner_code = ('import sys,os,base64\n'
+            'from lupa import LuaRuntime\n'
+            'TRACER_LUA=base64.b64decode("' + tracer_b64 + '").decode("utf-8")\n'
+            'if len(sys.argv)<2:\n'
+            '    print("[EX]No input file");sys.exit(1)\n'
+            'with open(sys.argv[1],"r",encoding="utf-8",errors="replace") as f:code=f.read()\n'
+            'lua=LuaRuntime(unpack_returned_tuples=True)\n'
+            'try:lua.execute(TRACER_LUA+chr(10)+code);print("[DONE]")\n'
+            'except Exception as e:print("[EX]"+str(e)[:500])\n')
+
+        runner_file = tempfile.mktemp(suffix='.py', prefix='wad_runner_')
+        obf_file = tempfile.mktemp(suffix='.lua', prefix='wearedev_v3_')
         try:
+            with open(runner_file, 'w') as f:
+                f.write(runner_code)
+            with open(obf_file, 'w') as f:
+                f.write(obf)
+
             result = subprocess.run(
-                [sys.executable, runner_script, "--wearedev-runner", obf_file],
+                [sys.executable, runner_file, obf_file],
                 capture_output=True, text=True, timeout=15
             )
         except subprocess.TimeoutExpired:
@@ -867,8 +865,9 @@ class WeAreDevDeobfuscator:
         except Exception:
             result = subprocess.CompletedProcess([], 1, stdout='', stderr='error')
         finally:
-            if os.path.exists(obf_file):
-                os.unlink(obf_file)
+            for fp in (runner_file, obf_file):
+                if os.path.exists(fp):
+                    os.unlink(fp)
 
         prints, trace, errors = [], [], []
         for line in result.stdout.split('\n'):
