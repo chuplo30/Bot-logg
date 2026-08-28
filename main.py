@@ -33,13 +33,13 @@ import discord
 from discord.ext import commands
 from flask import Flask
 
-from main import LuaDeobfuscator
+from bot import LuaDeobfuscator
 
 # ============================================================
 # Config
 # ============================================================
 
-TOKEN = os.environ.get("DISCORD_TOKEN)
+TOKEN = os.environ.get("DISCORD_TOKEN")
 COMMAND_PREFIX = "."
 DISCORD_MSG_LIMIT = 1900  # leave headroom under the 2000 char hard limit
 
