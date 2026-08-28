@@ -1,29 +1,3 @@
-#!/usr/bin/env python3
-"""
-Lua Deobfuscation Toolkit v2.0 - Full Source Recovery
-By Hunter Gay - Hunter Team Community
-
-Recovers original Lua source code from obfuscated scripts.
-Uses Lua VM execution (lupa/LuaJIT) + static analysis.
-
-Supported obfuscators:
-  - IronBrew / IronBrew2
-  - WAN OBFUSCATE / WAN OBFUSCATOR
-  - MoonSec V3
-  - Clyde Protection v2
-  - AstroProtect 2.2
-  - Base64 + DEFLATE / ZLIB / GZIP
-  - Generic VM-based (auto-detect + execution)
-
-Usage:
-  python lua_deobf_toolkit.py input.lua
-  python lua_deobf_toolkit.py input.lua -o output.lua
-  python lua_deobf_toolkit.py input.lua --detect-only
-  python lua_deobf_toolkit.py input.lua -v
-
-Requirements:
-  pip install lupa
-"""
 
 import re
 import sys
@@ -31,8 +5,45 @@ import os
 import zlib
 import base64
 import time
+import json
+import math
+import tempfile
+import multiprocessing
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple, Any
+
+
+# ============================================================
+# Utility
+# ============================================================
+
+def eval_arith(expr: str) -> Optional[int]:
+    """Evaluate obfuscated arithmetic like -418876+418904."""
+    expr = expr.strip().replace('-(-', '+(')
+    try:
+        return int(eval(expr))
+    except:
+        return None
+
+
+def decode_decimal_escapes(s: str) -> str:
+    r"""Convert \ddd decimal escapes in a Lua string to actual characters."""
+    result = []
+    i = 0
+    while i < len(s):
+        if s[i] == '\\' and i + 1 < len(s) and s[i+1].isdigit():
+            num_str = ''
+            j = i + 1
+            while j < len(s) and j < i + 4 and s[j].isdigit():
+                num_str += s[j]
+                j += 1
+            if num_str:
+                result.append(chr(int(num_str)))
+                i = j
+                continue
+        result.append(s[i])
+        i += 1
+    return ''.join(result)
 
 
 # ============================================================
@@ -111,14 +122,12 @@ print("_SETUP_OK")
         runner_lua = r"""
 local code = ...
 
--- Capture state
 local _orig_print = print
 local _orig_load = load
 local _print_output = {}
 local captured_loads = {}
 local load_count = 0
 
--- Hook print
 _G.print = function(...)
     local args = {...}
     local strs = {}
@@ -144,7 +153,6 @@ if not _G.loadstring then
     _G.loadstring = _G.load
 end
 
--- Try to load and execute
 local fn, err = load(code)
 if not fn then
     return {status="compile_error", error=tostring(err), prints={}}
@@ -166,11 +174,9 @@ return {status=ok and "ok" or "runtime_error", error=ok and nil or tostring(resu
             result = self.lua.execute(runner_lua, code)
             elapsed = time.time() - start
 
-            # Convert Lua table to Python dict recursively
             def lua2py(obj):
                 if hasattr(obj, 'keys'):
                     d = {str(k): lua2py(obj[k]) for k in obj.keys()}
-                    # Check if it's an array-like table (consecutive int keys from 1)
                     int_keys = [k for k in obj.keys() if isinstance(k, int)]
                     if int_keys and max(int_keys) == len(int_keys) and min(int_keys) == 1:
                         return [lua2py(obj[i]) for i in range(1, len(int_keys)+1)]
@@ -199,10 +205,8 @@ return {status=ok and "ok" or "runtime_error", error=ok and nil or tostring(resu
         except Exception as e:
             elapsed = time.time() - start
             err_str = str(e)
-
             if elapsed >= timeout - 1:
                 return False, "Execution timed out", []
-
             return False, err_str, []
 
     def execute_simple(self, code: str, timeout: float = 15) -> Tuple[bool, List[str]]:
@@ -263,12 +267,10 @@ class ObfuscatorDetector:
 # ============================================================
 
 class Base64CompressDeobfuscator:
-    """Base64 + DEFLATE/ZLIB/GZIP -> Lua source.
-    Only triggers if no known obfuscator signature is found (pure compression wrapper)."""
+    """Base64 + DEFLATE/ZLIB/GZIP -> Lua source."""
 
     @staticmethod
     def deobfuscate(code: str, engine: LuaEngine, verbose: bool) -> Optional[Tuple[str, dict]]:
-        # Skip if any known VM obfuscator is detected
         for sig in ["AstroProtect", "WAN OBFUSCATE", "WAN OBFUSCATOR",
                     "MoonSec", "Clyde", "IronBrew", "LOL!",
                     "Luraph", "PSU", "Prometheus", "Oxy"]:
@@ -293,8 +295,6 @@ class Base64CompressDeobfuscator:
             try:
                 decompressed = zlib.decompress(compressed, wbits)
                 source = decompressed.decode("utf-8", errors="replace")
-
-                # Check if result is plain Lua (not another VM wrapper)
                 vm_indicators = ["bit32", "4294967296", "while true do", "getfenv"]
                 vm_score = sum(1 for v in vm_indicators if v in source)
 
@@ -306,7 +306,6 @@ class Base64CompressDeobfuscator:
                     "vm_wrapped": vm_score > 2,
                 }
 
-                # If the decompressed content is another VM, try executing it
                 if vm_score > 2 and engine.available:
                     if verbose:
                         print(f"  [*] Decompressed content is VM-wrapped, executing...")
@@ -334,7 +333,6 @@ class AstroProtectDeobfuscator:
         if "AstroProtect" not in code:
             return None
 
-        # Step 1: Extract and decompress
         b64_match = re.search(r'\w+="([A-Za-z0-9+/=]{200,})"', code)
         if not b64_match:
             return None
@@ -347,20 +345,16 @@ class AstroProtectDeobfuscator:
         try:
             compressed = base64.b64decode(b64_str)
             vm_code = zlib.decompress(compressed, -15).decode("utf-8", errors="replace")
-        except Exception as e:
+        except Exception:
             return None
 
         if verbose:
             opcodes = re.findall(r'elseif ox==(\d+)', vm_code)
             h_table = re.findall(r'\{\d+,\d+,\{[^}]*\},\{[^}]*\}\}', vm_code)
-            wm = re.search(r'cid:\s*(\w+)', code)
             print(f"  [*] DEFLATE: {len(compressed)} -> {len(vm_code)} bytes")
             print(f"  [*] VM opcodes: {len(set(int(x) for x in opcodes)) if opcodes else 0}")
             print(f"  [*] Encrypted strings: {len(h_table)}")
-            if wm:
-                print(f"  [*] Watermark: cid:{wm.group(1)}")
 
-        # Step 2: Execute VM to recover source
         if engine.available:
             if verbose:
                 print("  [*] Executing VM...")
@@ -370,11 +364,9 @@ class AstroProtectDeobfuscator:
                 print(f"  [*] VM result: ok={ok}, source_len={len(source) if source else 0}, prints={prints}")
 
             if source and len(source) > 10 and "bit32" not in source[:200]:
-                # loadstring was captured - this IS the source
                 return source, {"method": "VM execution (loadstring capture)"}
 
             if ok and prints:
-                # VM ran successfully, reconstruct from print output
                 recovered = SourceReconstructor.from_prints(prints)
                 return recovered, {
                     "method": "VM execution (print trace)",
@@ -383,9 +375,7 @@ class AstroProtectDeobfuscator:
 
             if not ok:
                 err_str = str(source) if source else ""
-                # Integrity check with fake error message
                 if "attempt to call a table value" in err_str:
-                    # Try executing with no args via a wrapper
                     if verbose:
                         print("  [*] Trying direct VM execution...")
                     wrapper = r'''
@@ -445,7 +435,6 @@ class IronBrewDeobfuscator:
                 recovered = SourceReconstructor.from_prints(prints)
                 return recovered, {"method": "VM execution (print trace)", "print_count": len(prints)}
 
-        # Fallback: static string extraction
         strings = IronBrewDeobfuscator._extract_strings(code)
         lines = ["-- IronBrew2 Deobfuscated (string extraction)"]
         lines.append(f"-- Recovered {len(strings)} strings:")
@@ -458,9 +447,7 @@ class IronBrewDeobfuscator:
     @staticmethod
     def _extract_strings(code: str) -> List[str]:
         strings = []
-        # Look for string literals that look like API calls or variable names
         str_literals = re.findall(r'"([A-Za-z_][A-Za-z0-9_]{2,})"', code)
-        # Filter common Lua/Roblox API names
         api_names = {"print", "warn", "game", "Instance", "workspace", "wait",
                      "GetService", "FindFirstChild", "Clone", "Destroy",
                      "CFrame", "Vector3", "Color3", "UDim2", "TweenInfo",
@@ -511,7 +498,6 @@ class MoonSecDeobfuscator:
                 recovered = SourceReconstructor.from_prints(prints)
                 return recovered, {"method": "VM execution (print trace)", "print_count": len(prints)}
 
-        # Fallback: extract encoded data
         b64_match = re.search(r'"([A-Za-z0-9+/=]{100,})"', code)
         lines = ["-- MoonSec V3 (structural analysis)"]
         if b64_match:
@@ -541,7 +527,6 @@ class ClydeDeobfuscator:
                 recovered = SourceReconstructor.from_prints(prints)
                 return recovered, {"method": "VM execution (print trace)", "print_count": len(prints)}
 
-        # Fallback: static analysis
         tables = re.findall(r'local\s+\w+\s*=\s*\{([^}]{50,})\}', code)
         ascii85 = re.search(r'<~([A-Za-z0-9!#$%&*+/=?@^_`{|}~-]+)~>', code)
         lines = ["-- Clyde Protection v2 (structural analysis)"]
@@ -553,106 +538,369 @@ class ClydeDeobfuscator:
 
 
 class WeAreDevDeobfuscator:
-    """WeAreDev Obfuscator v1.0.0: CFF + encrypted string/number tables.
-    Uses multiprocessing to handle infinite loops (game scripts)."""
+    """WeAreDev Obfuscator v1.0.0 - Full decompiler with execution tracing.
 
-    RUNNER_PATH = "/home/z/my-project/scripts/run_wearedev.lua"
+    Architecture:
+    - Phase 1: Decode P-table string constants via Lua injection
+    - Phase 2: Run VM with tracing proxies (captures ALL operations)
+    - Phase 3: Reconstruct Lua source from execution trace
+    - Phase 4: Generate comprehensive output
+
+    v3 Improvement: Tracing proxies capture every API call, property access,
+    and method invocation - not just print() output.
+    """
+
+    M_OFFSET = 472584 - 466871  # 5713
 
     @staticmethod
     def deobfuscate(code: str, engine: LuaEngine, verbose: bool) -> Optional[Tuple[str, dict]]:
         if not engine.available:
             return None
 
-        import multiprocessing
-        import tempfile
-        import re
-
-        # Strip comment header
+        import subprocess
         obf = re.sub(r'^--\[\[.*?\]\]\s*', '', code)
 
-        with open(WeAreDevDeobfuscator.RUNNER_PATH) as f:
-            runner = f.read()
-
-        result_file = tempfile.mktemp(suffix='.txt', prefix='wearedev_')
-
-        def run_lua():
-            from lupa import LuaRuntime
-            import sys as _sys
-            _lua = LuaRuntime(unpack_returned_tuples=True)
-            _out = open(result_file, 'w')
-            class _W:
-                def write(self, s): _out.write(s); _out.flush()
-                def flush(self): _out.flush()
-            _orig = _sys.stdout
-            _sys.stdout = _W()
-            try:
-                _lua.execute(runner)
-                print('[STUBS_OK]')
-                try:
-                    _lua.execute(obf)
-                    print('[COMPLETED]')
-                except Exception as e:
-                    print(f'[ERROR]{e}')
-                _g = _lua.globals()
-                cp = _g._captured_prints
-                n = 0
-                try:
-                    while True:
-                        v = cp[n+1]
-                        if v is None: break
-                        print(f'[P]{v}')
-                        n += 1
-                except: pass
-                print(f'[PCOUNT]{n}')
-                cc = _g._captured_calls
-                n = 0
-                try:
-                    while True:
-                        v = cc[n+1]
-                        if v is None: break
-                        print(f'[C]{v}')
-                        n += 1
-                except: pass
-                print(f'[CCOUNT]{n}')
-            except Exception as e:
-                print(f'[FATAL]{e}')
-            finally:
-                _out.close()
-                _sys.stdout = _orig
-
+        # Phase 1: Decode P-table
         if verbose:
-            print("  [*] Executing WeAreDev VM (multiprocessing, 15s timeout)...")
-
-        p = multiprocessing.Process(target=run_lua)
-        p.start()
-        p.join(timeout=15)
-        if p.is_alive():
-            p.terminate(); p.join(timeout=3)
-            if p.is_alive(): p.kill(); p.join()
+            print("  [*] Phase 1: Decoding P-table string constants...")
+        P_decoded = WeAreDevDeobfuscator._decode_p_table(obf, engine)
+        if not P_decoded:
             if verbose:
-                print("  [*] Timed out - captured output is valid")
-
-        # Parse results
-        prints, calls = [], []
-        if os.path.exists(result_file):
-            with open(result_file) as f:
-                for line in f:
-                    line = line.rstrip('\n')
-                    if line.startswith('[P]'): prints.append(line[3:])
-                    elif line.startswith('[C]'): calls.append(line[3:])
-            os.unlink(result_file)
-
-        if not prints and not calls:
+                print("  [!] Failed to decode P-table")
             return None
 
-        # Reconstruct source
-        source = SourceReconstructor.from_prints(prints) if prints else "-- No print output captured"
-        meta = {"method": "CFF VM execution (multiprocessing)", "print_count": len(prints)}
-        if calls:
-            meta["call_count"] = len(calls)
+        string_map = WeAreDevDeobfuscator._build_string_map(obf, P_decoded)
+        real_strings = {k: v for k, v in string_map.items()
+                        if v and not re.match(r'^[A-Za-z0-9]{8,20}$', v)}
+
+        if verbose:
+            print(f"  [*] P-table: {len(P_decoded)} entries, {len(real_strings)} meaningful strings")
+
+        # Phase 2: Execute VM with tracing
+        if verbose:
+            print("  [*] Phase 2: Executing VM with full tracing (15s timeout)...")
+
+        prints, trace, errors = WeAreDevDeobfuscator._execute_vm_traced(obf)
+
+        if verbose:
+            print(f"  [*] Captured: {len(prints)} prints, {len(trace)} trace entries, {len(errors)} errors")
+
+        # Phase 3: Reconstruct source from trace
+        reconstructed = WeAreDevDeobfuscator._reconstruct_source(trace, prints)
+
+        # Phase 4: Generate output
+        source = WeAreDevDeobfuscator._generate_output(
+            obf, P_decoded, string_map, prints, trace, errors, reconstructed, verbose)
+
+        meta = {
+            "method": "P-table decode + traced VM execution + source reconstruction",
+            "p_entries": len(P_decoded),
+            "strings_decoded": len(real_strings),
+            "print_count": len(prints),
+            "trace_entries": len(trace),
+            "reconstructed_lines": len(reconstructed.split('\n')) if reconstructed else 0,
+        }
+
         return source, meta
 
+    @staticmethod
+    def _decode_p_table(obf: str, engine: LuaEngine) -> Optional[Dict[int, str]]:
+        """Decode P-table by injecting print before CFF return."""
+        inject_marker = 'return(function(P,l,g,d,Q,z,H,O,c,j,x,f,R,U,k,a,v,K,C,E)'
+        inject_pos = obf.find(inject_marker)
+        if inject_pos == -1:
+            return None
 
+        inject = 'do \n  for i=1,#P do \n    if type(P[i])=="string" and #P[i]>0 then \n      local hex="" \n      for ci=1,#P[i] do hex=hex..string.format("%02x",P[i]:byte(ci)) end \n      print("PDEC|"..i.."|"..hex) \n    else \n      print("PDEC|"..i.."|") \n    end \n  end \n  print("PDEC_DONE") \n  return nil \nend \n'
+
+        modified = obf[:inject_pos] + inject + obf[inject_pos:]
+
+        captured = []
+        engine.lua.globals()['print'] = lambda *args: captured.append(' '.join(str(a) for a in args))
+
+        try:
+            engine.lua.execute(modified)
+        except:
+            pass
+
+        engine._setup()
+
+        P_hex = {}
+        for line in captured:
+            if line.startswith('PDEC|'):
+                parts = line.split('|')
+                idx = int(parts[1])
+                P_hex[idx] = parts[2] if len(parts) > 2 else ''
+
+        P_decoded = {}
+        for idx, h in P_hex.items():
+            if h:
+                try:
+                    raw = bytes.fromhex(h)
+                    P_decoded[idx] = raw.decode('utf-8')
+                except:
+                    P_decoded[idx] = f'[hex:{h}]'
+            else:
+                P_decoded[idx] = ''
+
+        return P_decoded if P_decoded else None
+
+    @staticmethod
+    def _build_string_map(obf: str, P_decoded: Dict[int, str]) -> Dict[int, str]:
+        """Build M(value) -> decoded string mapping."""
+        string_map = {}
+        m_pattern = r'M\((-?\d+\+-?\d+)\)'
+        for m in re.finditer(m_pattern, obf):
+            val = eval_arith(m.group(1))
+            if val is not None:
+                idx = val - WeAreDevDeobfuscator.M_OFFSET
+                if idx in P_decoded:
+                    string_map[val] = P_decoded[idx]
+        return string_map
+
+    @staticmethod
+    def _execute_vm_traced(obf: str) -> Tuple[List[str], List[str], List[str]]:
+        """Execute VM via subprocess with tracing. Returns (prints, trace, errors)."""
+        import subprocess
+
+        obf_file = tempfile.mktemp(suffix='.lua', prefix='wearedev_v3_')
+        with open(obf_file, 'w') as f:
+            f.write(obf)
+
+        runner_script = os.path.join(os.path.dirname(__file__), 'wearedev_vm_runner.py')
+        try:
+            result = subprocess.run(
+                [sys.executable, runner_script, obf_file],
+                capture_output=True, text=True, timeout=15
+            )
+        except subprocess.TimeoutExpired:
+            result = subprocess.CompletedProcess([], 1, stdout='', stderr='timeout')
+        except Exception:
+            result = subprocess.CompletedProcess([], 1, stdout='', stderr='error')
+        finally:
+            if os.path.exists(obf_file):
+                os.unlink(obf_file)
+
+        prints, trace, errors = [], [], []
+        for line in result.stdout.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith('[P]'):
+                prints.append(line[3:])
+            elif line.startswith('[T]'):
+                trace.append(line[3:])
+            elif line.startswith('[EX]'):
+                errors.append(line[4:])
+
+        return prints, trace, errors
+
+    @staticmethod
+    def _reconstruct_source(trace: List[str], prints: List[str]) -> str:
+        """Convert trace entries to reconstructed Lua source.
+
+        Strategy:
+        - Remove entries that are prefixes of other entries (intermediate indexing)
+        - Keep leaf entries (final calls, assignments, standalone operations)
+        - Deduplicate
+        - Separate comments from code
+        """
+        if not trace:
+            return ''
+
+        # Separate comments and code
+        comments = []
+        code_entries = []
+        for entry in trace:
+            if entry.startswith('--'):
+                comments.append(entry)
+            else:
+                code_entries.append(entry)
+
+        # Remove prefix entries (intermediate indexing kept for final operations)
+        filtered = []
+        for i, entry in enumerate(code_entries):
+            is_prefix = any(
+                j != i and (other.startswith(entry + '.') or other.startswith(entry + '('))
+                for j, other in enumerate(code_entries)
+            )
+            if not is_prefix:
+                filtered.append(entry)
+
+        # Deduplicate while preserving order
+        seen = set()
+        unique = []
+        for entry in filtered:
+            if entry not in seen:
+                seen.add(entry)
+                unique.append(entry)
+
+        # Build output
+        lines = []
+
+        # Comments (skip noisy anti-tamper pow errors)
+        for c in comments:
+            if 'pow' not in c and 'Tamper' not in c.lower():
+                lines.append(c)
+
+        # Code (skip prints already captured by trace)
+        has_print_in_trace = any(e.startswith('print(') for e in unique)
+        for entry in unique:
+            lines.append(entry)
+
+        # Add prints only if trace didn't capture them
+        if not has_print_in_trace:
+            for p in prints:
+                try:
+                    float(p)
+                    stmt = f'print({p})'
+                except ValueError:
+                    stmt = f'print("{p}")'
+                lines.append(stmt)
+
+        return '\n'.join(lines)
+
+    @staticmethod
+    def _generate_output(obf: str, P_decoded: Dict[int, str],
+                         string_map: Dict[int, str],
+                         prints: List[str], trace: List[str],
+                         errors: List[str], reconstructed: str,
+                         verbose: bool) -> str:
+        """Generate the final deobfuscated output."""
+        lines = []
+        lines.append('-- Deobfuscated by Hunter Gay - Lua Deobfuscation Toolkit v3.0')
+        lines.append('-- WeAreDev Obfuscator v1.0.0')
+        lines.append('')
+
+        # Section 1: Reconstructed source (MOST IMPORTANT - put it first)
+        has_reconstructed = reconstructed and len(reconstructed.strip()) > 0
+        if has_reconstructed:
+            lines.append('-- ============================================')
+            lines.append('-- RECONSTRUCTED SOURCE CODE')
+            lines.append('-- ============================================')
+            lines.append(reconstructed)
+            lines.append('')
+
+        # Section 2: Execution output
+        if prints:
+            lines.append('-- ============================================')
+            lines.append('-- SCRIPT OUTPUT')
+            lines.append('-- ============================================')
+            for p in prints:
+                lines.append(f'-- output: {p}')
+            lines.append('')
+
+        # Section 3: Errors
+        non_tamper = [e for e in errors if 'pow' not in e.lower() and 'Tamper' not in e]
+        tamper_count = len(errors) - len(non_tamper)
+
+        if non_tamper:
+            lines.append('-- ============================================')
+            lines.append('-- RUNTIME ERRORS')
+            lines.append('-- ============================================')
+            for e in non_tamper[:10]:
+                lines.append(f'--   {e[:200]}')
+            lines.append('')
+
+        if tamper_count > 0 and verbose:
+            lines.append(f'-- Note: {tamper_count} anti-tamper check(s) failed (expected)')
+            lines.append('')
+
+        # Section 4: Decoded string constants
+        lines.append('-- ============================================')
+        lines.append('-- DECODED STRING CONSTANTS (P-table)')
+        lines.append('-- ============================================')
+
+        meaningful = {}
+        for idx in sorted(P_decoded.keys()):
+            s = P_decoded[idx]
+            if not s or not s.strip():
+                continue
+            if re.match(r'^[A-Za-z0-9]{8,20}$', s):
+                continue
+            meaningful[idx] = s
+
+        if meaningful:
+            for idx, s in sorted(meaningful.items()):
+                lines.append(f'--   [{idx}] = {repr(s)}')
+            lines.append('')
+
+        # Section 5: M() reference map
+        lines.append('-- ============================================')
+        lines.append('-- M() FUNCTION REFERENCE MAP')
+        lines.append(f'-- M(x) = P[x - {WeAreDevDeobfuscator.M_OFFSET}]')
+        lines.append('-- ============================================')
+
+        if string_map:
+            for val in sorted(string_map.keys()):
+                s = string_map[val]
+                if s and not re.match(r'^[A-Za-z0-9]{8,20}$', s):
+                    lines.append(f'--   M({val}) = {repr(s)}')
+            lines.append('')
+
+        # Section 6: Behavioral analysis
+        lines.append('-- ============================================')
+        lines.append('-- SCRIPT BEHAVIOR ANALYSIS')
+        lines.append('-- ============================================')
+
+        all_str = ' '.join(str(v) for v in meaningful.values())
+        behaviors = []
+
+        checks = [
+            ('print' in all_str, 'Outputs text via print()'),
+            ('pcall' in all_str, 'Uses pcall for error handling'),
+            ('setmetatable' in all_str and '__index' in all_str, 'OOP-style tables with metatables'),
+            ('__metatable' in all_str, 'Protects metatable access (anti-inspect)'),
+            ('gsub' in all_str or 'gmatch' in all_str, 'Pattern matching (gsub/gmatch)'),
+            ('random' in all_str, 'Uses math.random'),
+            ('byte' in all_str or 'char' in all_str, 'String byte-level processing'),
+            ('concat' in all_str, 'Uses table.concat'),
+            ('tonumber' in all_str, 'String to number conversion'),
+            ('floor' in all_str, 'Uses math.floor'),
+            ('error' in all_str and 'Tamper' in all_str, 'Anti-tamper protection'),
+            (len(trace) > 5, f'Makes {len(trace)}+ API/operations calls'),
+        ]
+
+        for cond, desc in checks:
+            if cond:
+                behaviors.append(desc)
+
+        if behaviors:
+            for b in behaviors:
+                lines.append(f'--   [+] {b}')
+        else:
+            lines.append('--   (no specific behavior identified)')
+        lines.append('')
+
+        # Section 7: Simplified CFF (M() resolved, truncated)
+        lines.append('-- ============================================')
+        lines.append('-- SIMPLIFIED CFF (M() calls resolved to strings)')
+        lines.append('-- ============================================')
+
+        simplified = obf
+
+        def replace_m(m):
+            expr = m.group(1)
+            val = eval_arith(expr)
+            if val is not None and val in string_map:
+                s = string_map[val]
+                if s and not re.match(r'^[A-Za-z0-9]{8,20}$', s):
+                    return repr(s)
+            return m.group(0)
+
+        simplified = re.sub(r'M\((-?\d+\+-?\d+)\)', replace_m, simplified)
+        simplified = re.sub(r'=(\s*)(-?\d+\+-?\d+)', lambda m: '=' + m.group(1) + str(eval_arith(m.group(2)) or m.group(2)), simplified)
+
+        if len(simplified) > 2000:
+            lines.append(f'-- (showing first 2000 of {len(simplified)} chars)')
+            lines.append(simplified[:2000])
+            lines.append('-- ... (truncated)')
+        else:
+            lines.append(simplified)
+
+        lines.append('')
+
+        return '\n'.join(lines)
 class GenericVMDeobfuscator:
     """Generic VM-based: try execution and capture output."""
 
@@ -668,7 +916,6 @@ class GenericVMDeobfuscator:
                 recovered = SourceReconstructor.from_prints(prints)
                 return recovered, {"method": "VM execution (print trace)", "print_count": len(prints)}
 
-        # Static analysis
         while_loops = code.count("while true do")
         cff = len(re.findall(r'=\s*\d+\s*\+\s*\w+', code))
         lines = ["-- Generic VM Analysis"]
@@ -686,29 +933,20 @@ class SourceReconstructor:
 
     @staticmethod
     def from_prints(prints: List[str]) -> str:
-        """Reconstruct source from print() side effects."""
         if not prints:
             return "-- No output captured"
 
         lines = []
         for p in prints:
-            # Try to detect the type of argument
-            if p.startswith("{") or p.startswith("table:"):
+            try:
+                float(p)
                 lines.append(f"print({p})")
-            elif p == ("true" or p == "false" or p == "nil"):
-                lines.append(f"print({p})")
-            else:
-                # Try as string or number
-                try:
-                    float(p)
-                    lines.append(f"print({p})")
-                except ValueError:
-                    lines.append(f'print("{p}")')
+            except ValueError:
+                lines.append(f'print("{p}")')
         return "\n".join(lines)
 
     @staticmethod
     def from_api_calls(calls: List[dict]) -> str:
-        """Reconstruct source from API call traces."""
         lines = []
         for call in calls:
             lines.append(call.get("raw", "-- unknown call"))
@@ -748,7 +986,6 @@ class LuaDeobfuscator:
         Deobfuscate Lua code.
         Returns (obfuscator_name, recovered_source, metadata)
         """
-        # Detect
         detected = ObfuscatorDetector.detect(code)
         if self.verbose:
             print(f"[*] File: {name}")
@@ -760,11 +997,9 @@ class LuaDeobfuscator:
         obf_name = detected or "Unknown"
         prints = []
 
-        # Try each deobfuscator
         for deobf_cls in self.DEOBFUSCATORS:
             cls_name = deobf_cls.__name__.replace("Deobfuscator", "")
 
-            # Skip if detected type doesn't match (except generic ones)
             if detected and cls_name not in ("GenericVM", "Base64Compress"):
                 if cls_name.lower() not in detected.lower():
                     continue
@@ -785,7 +1020,6 @@ class LuaDeobfuscator:
                     obf_name = detected or cls_name
                     break
 
-                # No source recovered but we got prints
                 if "prints" in result_meta:
                     prints = result_meta["prints"]
 
@@ -794,7 +1028,6 @@ class LuaDeobfuscator:
                     print(f"[!] {cls_name} error: {e}")
                 meta["error"] = str(e)
 
-        # If we have prints but no source, reconstruct from prints
         if not source and prints:
             source = SourceReconstructor.from_prints(prints)
             meta["reconstructed_from"] = "print traces"
@@ -816,7 +1049,7 @@ class LuaDeobfuscator:
 
 def format_output(obf_name: str, source: str, meta: dict, verbose: bool) -> str:
     """Format the final output."""
-    lines = [f"-- Deobfuscated by Hunter Gay - Lua Deobfuscation Toolkit v2.0"]
+    lines = [f"-- Deobfuscated by Hunter Gay - Lua Deobfuscation Toolkit v3.0"]
     lines.append(f"-- Obfuscator: {obf_name}")
     for k, v in meta.items():
         if k not in ("error", "prints"):
@@ -830,7 +1063,7 @@ def main():
     args = sys.argv[1:]
 
     if not args or "-h" in args or "--help" in args:
-        print("Lua Deobfuscation Toolkit v2.0")
+        print("Lua Deobfuscation Toolkit v3.0")
         print("By Hunter Gay - Hunter Team Community\n")
         print(f"Usage: python {sys.argv[0]} <input.lua> [options]")
         print("")
@@ -841,10 +1074,10 @@ def main():
         print("")
         print("Supported: IronBrew2, WAN OBFUSCATE, MoonSec V3,")
         print("            Clyde Protection v2, AstroProtect 2.2,")
-        print("            WeAreDev v1.0.0, Base64+Compress, Generic VM")
+        print("            WeAreDev v1.0.0 (FULL), Base64+Compress,")
+        print("            Generic VM")
         sys.exit(0)
 
-    # Parse args
     input_file = None
     output_file = None
     detect_only = False
@@ -886,13 +1119,10 @@ def main():
         print(f"Detected: {detected}")
         return
 
-    # Deobfuscate
     obf_name, source, meta = deobf.deobfuscate_file(input_file)
 
-    # Format output
     output = format_output(obf_name, source, meta, verbose)
 
-    # Write or print
     if output_file:
         os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
         with open(output_file, "w", encoding="utf-8") as f:
@@ -902,11 +1132,11 @@ def main():
     else:
         print(output)
 
-    # Summary
     if verbose:
         print(f"\n[+] Obfuscator: {obf_name}")
         for k, v in meta.items():
             print(f"    {k}: {v}")
+
 
 
 # ============================================================
