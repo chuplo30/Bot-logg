@@ -32,7 +32,7 @@ app = Flask(__name__)
 # ============================================================
 LOG_DIR = os.environ.get("LOG_DIR", "/tmp/deobf_logs")
 os.makedirs(LOG_DIR, exist_ok=True)
-DISCORD _TOKEN = os.environ.get("DISCORD_TOKEN")
+DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 TZ = timezone(timedelta(hours=7))  # UTC+7
 
 # ============================================================
@@ -1378,7 +1378,7 @@ def api_get_log(filename: str):
 def run_discord_bot():
     """Chạy Discord bot trong thread riêng."""
     if not BOT_TOKEN:
-        print("[Bot] No DISCORD_BOT_TOKEN set, skipping bot startup.")
+        print("[Bot] No DISCORD_TOKEN set, skipping bot startup.")
         return
 
     try:
@@ -1458,7 +1458,7 @@ def run_discord_bot():
 # ============================================================
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 8080))
 
     # Chạy Discord bot trong thread riêng
     bot_thread = threading.Thread(target=run_discord_bot, daemon=True)
