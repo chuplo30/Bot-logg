@@ -2840,7 +2840,7 @@ Behavior:
 
 import threading as _threading
 import discord
-from .ext import commands
+from discord.ext import commands
 from flask import Flask
 import aiohttp
 
