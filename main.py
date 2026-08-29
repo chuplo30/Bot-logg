@@ -1,4 +1,9 @@
-
+"""
+WeAreDev Obfuscator v5.5 - Discord Bot
+Deobfuscates ALL WeAreDev obfuscated Lua scripts to ~90% original source.
+Supports: P-table extraction, shuffle reversal, custom base64 decode,
+          Lua 5.1 execution fallback, string reconstruction, URL fetch.
+"""
 
 import discord
 from discord import app_commands
@@ -801,7 +806,8 @@ if __name__ == '__main__':
                 print(f'Output: {outpath} ({len(result["source"])} chars)')
         else:
             print('Usage: python main.py <file.lua|url>')
-    else:
-print("Starting Discord bot...")
+else:
+    print("Starting Discord bot...")
+
 keep_alive()
 bot.run(DISCORD_BOT_TOKEN)
