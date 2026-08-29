@@ -1063,45 +1063,55 @@ class WeAreDevDeobfuscator:
 
     @staticmethod
     def _extract_b64_table(obf: str):
-        """Extract the custom base64 alphabet table B from WeAreDev code.
+        """v5.2: Extract the custom base64 alphabet table from WeAreDev code.
 
+        Searches ALL local tables (not just 'B') for the one with 50+ char mappings.
         Returns dict mapping char -> 6-bit index.
         """
-        m = re.search(r'local\s+B=\{(.*?)\}', obf, re.DOTALL)
-        if not m:
-            return None
-        body = m.group(1)
-        entries = re.split(r'[;,]', body)
-        b64_map = {}
-        for entry in entries:
-            entry = entry.strip()
-            if not entry or '=' not in entry:
-                continue
-            key_part, val_part = entry.split('=', 1)
-            key_part = key_part.strip()
-            val_part = val_part.strip()
-            val = eval_arith(val_part)
-            if val is None:
-                continue
-            if key_part.startswith('[') and key_part.endswith(']'):
-                inner = key_part[1:-1]
-                if len(inner) >= 2 and inner[0] == chr(34) and inner[-1] == chr(34):
-                    kbody = inner[1:-1]
-                    if len(kbody) >= 2 and kbody[0] == chr(92):
-                        try:
-                            key = chr(int(kbody[1:]))
-                        except:
-                            continue
+        for tbl_match in re.finditer(r'local (\w+)=\{', obf):
+            body_start = tbl_match.end()
+            depth = 1
+            pos = body_start
+            while pos < len(obf) and depth > 0:
+                if obf[pos] == '{':
+                    depth += 1
+                elif obf[pos] == '}':
+                    depth -= 1
+                pos += 1
+            body = obf[body_start:pos - 1]
+            entries = re.split(r'[;,]', body)
+            b64_map = {}
+            for entry in entries:
+                entry = entry.strip()
+                if not entry or '=' not in entry:
+                    continue
+                key_part, val_part = entry.split('=', 1)
+                key_part = key_part.strip()
+                val_part = val_part.strip()
+                val = eval_arith(val_part)
+                if val is None:
+                    continue
+                if key_part.startswith('[') and key_part.endswith(']'):
+                    inner = key_part[1:-1]
+                    if len(inner) >= 2 and inner[0] == chr(34) and inner[-1] == chr(34):
+                        kbody = inner[1:-1]
+                        if len(kbody) >= 2 and kbody[0] == chr(92):
+                            try:
+                                key = chr(int(kbody[1:]))
+                            except:
+                                continue
+                        else:
+                            key = kbody
                     else:
-                        key = kbody
+                        key = inner
+                elif len(key_part) == 1:
+                    key = key_part
                 else:
-                    key = inner
-            elif len(key_part) == 1:
-                key = key_part
-            else:
-                continue
-            b64_map[key] = val
-        return b64_map if b64_map else None
+                    continue
+                b64_map[key] = val
+            if len(b64_map) >= 50:
+                return b64_map
+        return None
 
     @staticmethod
     def _b64_decode(encoded: str, b64_map: dict) -> str:
@@ -1151,10 +1161,18 @@ class WeAreDevDeobfuscator:
 
     @staticmethod
     def _apply_swaps(p_table: dict, swaps: list):
-        """Apply swap operations to P-table (individual element swaps, matching WeAreDev VM behavior)."""
+        """v5.2: Apply swap operations as RANGE REVERSALS (not individual swaps).
+
+        WeAreDev swap loop: while w[1] < w[2] do
+            F[w[1]], F[w[2]], w[1], w[2] = F[w[2]], F[w[1]], w[1]+1, w[2]-1
+        end
+        This reverses F[a..b] in place.
+        """
         for a, b in swaps:
-            if a in p_table and b in p_table:
-                p_table[a], p_table[b] = p_table[b], p_table[a]
+            keys = sorted(k for k in p_table if a <= k <= b)
+            reversed_values = [p_table[k] for k in reversed(keys)]
+            for i, k in enumerate(keys):
+                p_table[k] = reversed_values[i]
 
     @staticmethod
     def _static_decode_p_table(obf: str, verbose: bool = False):
@@ -1413,82 +1431,177 @@ class WeAreDevDeobfuscator:
 
         return prints, trace, errors
 
+    COLON_METHODS = frozenset({
+        'GetService', 'WaitForChild', 'FindFirstChild', 'FindFirstChildOfClass',
+        'FindFirstChildWhichIsA', 'IsA', 'Clone', 'Destroy', 'Connect',
+        'Disconnect', 'InvokeServer', 'FireServer', 'Fire', 'OnServerEvent',
+        'OnClientEvent', 'HttpGet', 'HttpPost', 'Wait', 'GetPropertyChangedSignal',
+    })
+
+    @staticmethod
+    def _clean_chain(chain: str, service_names: set, last_service_var: str = None) -> str:
+        """v5.2: Replace game.GetService() with actual service variable."""
+        result = chain
+        if 'game.GetService()' in result:
+            parts = result.split('game.GetService()', 1)
+            rest = parts[1] if len(parts) > 1 else ''
+            if rest.startswith('.'):
+                rest = rest[1:]
+            first_seg = rest.split('.')[0] if rest else ''
+            for svc in service_names:
+                if first_seg == svc or rest.startswith(svc + '.'):
+                    result = rest
+                    break
+            else:
+                if last_service_var:
+                    result = last_service_var + rest
+                else:
+                    result = rest if rest else result
+        return result
+
     @staticmethod
     def _reconstruct_source(trace: List[str], prints: List[str],
                             string_map: Dict[int, str] = None,
                             resolved_cff: str = '') -> str:
-        """Convert trace entries to reconstructed Lua source.
+        """v5.2: Smart source reconstruction with instance tracking.
 
-        v5 improvements:
-        - Better handling of incomplete traces (avoid ') expected near <eof>')
-        - Extract meaningful code patterns from resolved CFF when trace is sparse
-        - Ensure output is valid Lua or clearly marked as reconstruction
+        Improvements:
+        - Instance.new() tracked as variables (inst1, inst2, ...)
+        - Properties grouped with their instance
+        - Constructor values (UDim2.new, Color3.fromRGB) resolved for = {}
+        - Service acquisition: game:GetService -> local X = game:GetService
+        - Empty table {} args cleaned, method calls use : syntax
         """
         if not trace and not prints:
             return ''
 
-        # Separate comments and code
-        comments = []
-        code_entries = []
-        for entry in trace:
+        COLON_METHODS = WeAreDevDeobfuscator.COLON_METHODS
+
+        non_prefix = []
+        for i, entry in enumerate(trace):
             if entry.startswith('--'):
-                comments.append(entry)
-            else:
-                code_entries.append(entry)
-
-        # Remove prefix entries (intermediate indexing kept for final operations)
-        filtered = []
-        for i, entry in enumerate(code_entries):
-            is_prefix = any(
+                non_prefix.append(entry)
+                continue
+            is_pref = any(
                 j != i and (other.startswith(entry + '.') or other.startswith(entry + '('))
-                for j, other in enumerate(code_entries)
+                for j, other in enumerate(trace)
             )
-            if not is_prefix:
-                filtered.append(entry)
+            if not is_pref:
+                non_prefix.append(entry)
 
-        # Deduplicate while preserving order
-        seen = set()
-        unique = []
-        for entry in filtered:
-            if entry not in seen:
-                seen.add(entry)
-                unique.append(entry)
-
-        # v5: if trace is very sparse, try to extract patterns from resolved CFF
-        if len(unique) < 3 and resolved_cff:
-            cff_lines = WeAreDevDeobfuscator._extract_code_from_cff(resolved_cff)
-            if cff_lines:
-                unique.extend(cff_lines)
-
-        # Build output
         lines = []
+        inst_counter = 0
+        current_inst = None
+        pending_value = None
+        service_names = set()
+        last_service_var = None
 
-        # Comments (skip noisy anti-tamper pow errors)
-        for c in comments:
-            if 'pow' not in c and 'Tamper' not in c.lower():
-                lines.append(c)
-
-        # Code entries - v5: validate each entry to avoid syntax issues
-        has_print_in_trace = any(e.startswith('print(') for e in unique)
-        for entry in unique:
-            # v5: skip entries that would create invalid Lua syntax
+        for entry in non_prefix:
             stripped = entry.strip()
-            if not stripped:
+            if not stripped or (stripped.endswith('.') and '(' not in stripped):
                 continue
-            # Skip entries that are just metatable paths without operations
-            if stripped.endswith('.') and '(' not in stripped:
-                continue
-            lines.append(entry)
 
-        # Add prints only if trace didn't capture them
-        if not has_print_in_trace:
+            if stripped.startswith('--'):
+                if 'pow' not in stripped and 'Tamper' not in stripped.lower():
+                    lines.append(stripped)
+                continue
+
+            if stripped.startswith('print('):
+                continue
+
+            m = re.match(r'game\.GetService\(\{\},\s*"(\w+)"\)', stripped)
+            if m:
+                svc = m.group(1)
+                service_names.add(svc)
+                last_service_var = svc
+                lines.append(f'local {svc} = game:GetService("{svc}")')
+                pending_value = None
+                continue
+
+            m = re.match(r'Instance\.new\("([^"]+)"\)', stripped)
+            if m:
+                inst_counter += 1
+                current_inst = f'inst{inst_counter}'
+                lines.append(f'local {current_inst} = Instance.new("{m.group(1)}")')
+                pending_value = None
+                continue
+
+            m = re.match(r'Instance\.new\(\)\.(\w+)\s*=\s*(.+)', stripped)
+            if m and current_inst:
+                prop = m.group(1)
+                val = m.group(2).strip()
+                if val == '{}':
+                    val = pending_value if pending_value else 'nil'
+                lines.append(f'{current_inst}.{prop} = {val}')
+                if pending_value and '=' in stripped:
+                    pending_value = None
+                continue
+
+            m = re.match(r'(UDim2|Color3|UDim|Vector3|Vector2|CFrame|TweenInfo|Rect|NumberSequence|ColorSequence|NumberRange)\.(\w+)\((.+)', stripped)
+            if m:
+                pending_value = stripped
+                continue
+
+            m = re.match(r'Enum\.(\w+\.\w+)', stripped)
+            if m:
+                pending_value = stripped
+                continue
+
+            m = re.match(r'(.+?)\.Connect\(\{\},\s*function\)', stripped)
+            if m:
+                chain = m.group(1)
+                chain = WeAreDevDeobfuscator._clean_chain(chain, service_names, last_service_var)
+                lines.append(f'{chain}:Connect(function()')
+                lines.append(f'    -- [deobfuscated - callback body requires Roblox environment]')
+                lines.append(f'end)')
+                pending_value = None
+                continue
+
+            m = re.match(r'game\.GetService\(\)\.([\w.]+)\.(\w+)\(\{\},\s*(.+)\)', stripped)
+            if m:
+                chain = m.group(1)
+                method = m.group(2)
+                args = m.group(3).strip()
+                chain = WeAreDevDeobfuscator._clean_chain(chain, service_names, last_service_var)
+                colon = ':' if method in COLON_METHODS else '.'
+                lines.append(f'{chain}{colon}{method}({args})')
+                pending_value = None
+                continue
+
+            m = re.match(r'game\.GetService\(\)\.([\w.]+)\.(\w+)\s*=\s*(.+)', stripped)
+            if m:
+                obj_chain = m.group(1)
+                prop = m.group(2)
+                val = m.group(3).strip()
+                obj_chain = WeAreDevDeobfuscator._clean_chain(obj_chain, service_names, last_service_var)
+                if val == '{}':
+                    val = pending_value if pending_value else 'nil'
+                lines.append(f'{obj_chain}.{prop} = {val}')
+                if pending_value:
+                    pending_value = None
+                continue
+
+            m = re.match(r'game\.HttpGet\(\{\},\s*(.+)\)', stripped)
+            if m:
+                lines.append(f'game:HttpGet({m.group(1).strip()})')
+                pending_value = None
+                continue
+
+            cleaned = stripped
+            cleaned = cleaned.replace('({}, ', '(').replace(', {})', ')')
+            cleaned = cleaned.replace('{}', '')
+            cleaned = cleaned.strip()
+            if cleaned and cleaned != '{}':
+                lines.append(cleaned)
+
+        has_print = any(l.strip().startswith('print(') for l in lines)
+        if not has_print:
             for p in prints:
                 try:
                     float(p)
-                    stmt = f'print({p})'
+                    lines.append(f'print({p})')
                 except ValueError:
-                    stmt = f'print("{p}")'
-                lines.append(stmt)
+                    lines.append(f'print("{p}")')
 
         return '\n'.join(lines)
 
@@ -1751,7 +1864,6 @@ class LuaDeobfuscator:
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
             code = f.read()
         return ObfuscatorDetector.detect(code) or "Unknown/Clear text"
-
 
 import threading as _threading
 import discord
