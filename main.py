@@ -1036,10 +1036,31 @@ print("[DONE]")
 
 
 class WeAreDevDeobfuscator:
-    """WeAreDev v1.0.0 decompiler - v5.2+ with balanced paren resolution,
-    deep body mining, smart variable naming, improved reconstruction."""
+    """WeAreDev v1.0.0 decompiler - v5.4 with CFF block extraction, enhanced tracer,
+    arithmetic simplification, deep body mining, smart variable naming."""
 
     M_OFFSET = 472584 - 466871
+
+    # v5.3: Known API method names used by WeAreDev VM
+    VM_API_NAMES = frozenset({
+        'GetService', 'WaitForChild', 'FindFirstChild', 'FindFirstChildOfClass',
+        'Connect', 'Disconnect', 'Fire', 'FireServer', 'InvokeServer',
+        'OnServerEvent', 'OnClientEvent', 'IsA', 'Clone', 'Destroy',
+        'HttpGet', 'HttpPost', 'Wait', 'GetPropertyChangedSignal',
+        'GetChildren', 'GetDescendants', 'GetAttribute', 'SetAttribute',
+        'LoadCharacter', 'MoveTo', 'WalkTo', 'Play', 'Stop',
+        'GetDataStore', 'GetAsync', 'SetAsync', 'GetOrderedDataStore',
+        'ComputeAsync', 'GetWaypoints', 'CreatePath',
+    })
+
+    VM_UTILITY_NAMES = frozenset({
+        'gsub', 'sub', 'find', 'match', 'format', 'rep', 'len', 'byte',
+        'char', 'lower', 'upper', 'reverse', 'gmatch', 'concat',
+        'tonumber', 'tostring', 'type', 'pairs', 'ipairs', 'unpack',
+        'pcall', 'xpcall', 'error', 'warn', 'assert', 'select',
+        'rawget', 'rawset', 'setmetatable', 'getmetatable',
+        'math', 'string', 'table', 'coroutine', 'bit32',
+    })
 
     @staticmethod
     def deobfuscate(code: str, engine: LuaEngine, verbose: bool) -> Optional[Tuple[str, dict]]:
@@ -1084,13 +1105,22 @@ class WeAreDevDeobfuscator:
         if verbose:
             print(f"  [*] Resolved {oc - nc}/{oc} accessor calls")
 
+        # v5.3: Phase 3.5 - Post-CFF: decode escapes + simplify arithmetic
+        if verbose:
+            print("  [*] Phase 3.5: Post-CFF decode + simplify...")
+        decoded_cff = WeAreDevDeobfuscator._post_process_cff(resolved_cff)
+
         if verbose:
             print("  [*] Phase 4: Deep analysis...")
-        body_code = WeAreDevDeobfuscator._deep_mine_body(resolved_cff, string_map)
-        cff_code = WeAreDevDeobfuscator._mine_cff_code(resolved_cff, string_map)
-        structure_code = WeAreDevDeobfuscator._extract_code_structure(resolved_cff, string_map)
+        body_code = WeAreDevDeobfuscator._deep_mine_body(decoded_cff, string_map)
+        cff_code = WeAreDevDeobfuscator._mine_cff_code(decoded_cff, string_map)
+        structure_code = WeAreDevDeobfuscator._extract_code_structure(decoded_cff, string_map)
+        # v5.4: Extract complete code blocks (loop bodies, function bodies, if blocks)
+        cff_blocks = WeAreDevDeobfuscator._extract_cff_blocks(decoded_cff, string_map)
+        # v5.4: Phase 4.5 - Opcode analysis
+        opcode_strings = WeAreDevDeobfuscator._mine_opcode_strings(decoded_cff)
         if verbose:
-            print(f"  [*] Body:{len(body_code)} CFF:{len(cff_code)} Struct:{len(structure_code)}")
+            print(f"  [*] Body:{len(body_code)} CFF:{len(cff_code)} Struct:{len(structure_code)} Opcode:{len(opcode_strings)} Blocks:{len(cff_blocks)}")
 
         if verbose:
             print("  [*] Phase 5: Reconstruct + smart rename...")
@@ -1099,15 +1129,18 @@ class WeAreDevDeobfuscator:
 
         source = WeAreDevDeobfuscator._generate_clean_output(
             reconstructed, trace, prints, errors, P_decoded, string_map, verbose,
-            m_offset, accessor_name, cff_code, structure_code, body_code)
+            m_offset, accessor_name, cff_code, structure_code, body_code,
+            opcode_strings=opcode_strings, cff_blocks=cff_blocks)
 
         meta = {
-            "method": "P-table + VM trace + balanced CFF + deep mining + smart naming",
+            "method": "P-table + VM trace + CFF blocks + enhanced tracer + opcode analysis + smart naming",
             "p_entries": len(P_decoded), "strings_decoded": len(real_strings),
             "print_count": len(prints), "trace_entries": len(trace),
             "cff_code_patterns": len(cff_code),
             "structure_patterns": len(structure_code) if structure_code else 0,
             "body_code_patterns": len(body_code),
+            "opcode_strings": len(opcode_strings),
+            "cff_blocks": len(cff_blocks),
             "reconstructed_lines": len(reconstructed.split(chr(10))) if reconstructed else 0,
         }
         return source, meta
@@ -1220,8 +1253,14 @@ class WeAreDevDeobfuscator:
             pos += 1
         p_end = pos - 1
         p_raw_text = obf[p_start:p_end]
-        acc_match = re.search(r'local\s+function\s+(\w+)\(', obf[p_end:p_end+200])
-        accessor_name = acc_match.group(1) if acc_match else 'M'
+        # v5.4: Use _extract_m_offset for correct accessor name (fixes wrong name after P-table)
+        _m_off, acc_from_offset = WeAreDevDeobfuscator._extract_m_offset(obf)
+        if re.search(re.escape(acc_from_offset) + r'\(', obf):
+            accessor_name = acc_from_offset
+            m_offset = _m_off
+        else:
+            acc_match = re.search(r'local\s+function\s+(\w+)\(', obf[p_end:p_end+200])
+            accessor_name = acc_match.group(1) if acc_match else 'M'
         p_entries, scan = [], 0
         while scan < len(p_raw_text):
             q1 = p_raw_text.find(chr(34), scan)
@@ -1322,8 +1361,10 @@ class WeAreDevDeobfuscator:
     @staticmethod
     def _build_string_map(obf: str, P_decoded: Dict[int, str], m_offset: int, accessor_name: str = 'M') -> Dict[int, str]:
         string_map = {}
-        for m in re.finditer(accessor_name + r'\((-?\d+[+-]?-?\d+)\)', obf):
-            val = eval_arith(m.group(1))
+        # v5.4: Broadened regex to handle parenthesized negatives like P(-548-(-35897))
+        for m in re.finditer(accessor_name + r'\((-?\d+(?:[+-]\(?-?\d+\)?|[+-]-?\d+)*)\)', obf):
+            expr = m.group(1).replace('((', '(').replace('))', ')')
+            val = eval_arith(expr)
             if val is not None:
                 idx = val - m_offset
                 if idx in P_decoded:
@@ -1386,6 +1427,207 @@ class WeAreDevDeobfuscator:
     @staticmethod
     def _resolve_cff_strings(obf: str, string_map: dict, accessor_name: str) -> str:
         return WeAreDevDeobfuscator._resolve_cff_strings_v2(obf, string_map, accessor_name)
+
+    # ============================================================
+    # Phase 3.5: Post-CFF decode + arithmetic simplification (v5.3 NEW)
+    # ============================================================
+
+    @staticmethod
+    def _simplify_arith_expr(expr: str) -> str:
+        """Simplify a single arithmetic expression like -903041-(-903042) -> 1."""
+        expr = expr.strip()
+        val = eval_arith(expr)
+        if val is not None:
+            return str(val)
+        return expr
+
+    @staticmethod
+    def _simplify_arith_in_code(code: str) -> str:
+        """Simplify arithmetic expressions throughout code: -903041-(-903042) -> 1."""
+        # Pattern: number -(-number) (single paren)
+        code = re.sub(r'-?\d+-\(-\d+\)',
+                       lambda m: WeAreDevDeobfuscator._simplify_arith_expr(m.group(0)), code)
+        # Pattern: number -((-number)) (double parens)
+        code = re.sub(r'-?\d+-\(\(-\d+\)\)',
+                       lambda m: WeAreDevDeobfuscator._simplify_arith_expr(m.group(0)), code)
+        # Pattern: number +-number
+        code = re.sub(r'(-?\d+)[+]-\d+',
+                       lambda m: WeAreDevDeobfuscator._simplify_arith_expr(m.group(0)), code)
+        # Pattern: number +(-number)
+        code = re.sub(r'(-?\d+)\+\(-\d+\)',
+                       lambda m: WeAreDevDeobfuscator._simplify_arith_expr(m.group(0)), code)
+        # Pattern: -number+number (obfuscated constants)
+        def neg_plus(m):
+            val = eval_arith(m.group(0))
+            if val is not None and abs(val) < 100000:
+                return str(val)
+            return m.group(0)
+        code = re.sub(r'-\d+\+\d+', neg_plus, code)
+        # Pattern: simple number - number (careful not to match inside identifiers)
+        def safe_simplify(m):
+            expr = m.group(0)
+            start = m.start()
+            if start > 0 and code[start-1].isalpha():
+                return expr
+            return WeAreDevDeobfuscator._simplify_arith_expr(expr)
+        code = re.sub(r'(?<![a-zA-Z_.])-?\d+-\d+', safe_simplify, code)
+        return code
+
+    @staticmethod
+    def _decode_string_literals(code: str) -> str:
+        r"""Decode \ddd decimal escapes inside all quoted string literals."""
+        result = []
+        i = 0
+        n = len(code)
+        while i < n:
+            if code[i] == '"':
+                j = i + 1
+                while j < n and code[j] != '"':
+                    if code[j] == '\\' and j + 1 < n:
+                        j += 2
+                    else:
+                        j += 1
+                if j < n:
+                    raw_str = code[i+1:j]
+                    decoded = decode_decimal_escapes(raw_str)
+                    escaped = decoded.replace('\\', '\\\\').replace('"', '\\"')
+                    result.append('"' + escaped + '"')
+                    i = j + 1
+                    continue
+            result.append(code[i])
+            i += 1
+        return ''.join(result)
+
+    @staticmethod
+    def _post_process_cff(resolved_cff: str) -> str:
+        """v5.3: Decode decimal escapes + simplify arithmetic in CFF output.
+        This makes subsequent pattern mining much more effective."""
+        # Step 1: Decode decimal escape sequences in string literals
+        decoded = WeAreDevDeobfuscator._decode_string_literals(resolved_cff)
+        # Step 2: Simplify arithmetic expressions
+        simplified = WeAreDevDeobfuscator._simplify_arith_in_code(decoded)
+        return simplified
+
+    # ============================================================
+    # Phase 4.5: Opcode string analysis (v5.3 NEW)
+    # ============================================================
+
+    @staticmethod
+    def _mine_opcode_strings(decoded_cff: str) -> List[str]:
+        """v5.3: Extract API method names, messages, and meaningful strings
+        from the VM's opcode dispatch branches."""
+        if not decoded_cff:
+            return []
+        lines, seen = [], set()
+        def add(line):
+            if line and line not in seen:
+                seen.add(line)
+                lines.append(line)
+
+        API = WeAreDevDeobfuscator.VM_API_NAMES
+        UTILITY = WeAreDevDeobfuscator.VM_UTILITY_NAMES
+
+        # Find all meaningful string literals
+        for m in re.finditer(r'"([^"]{2,})"', decoded_cff):
+            s = m.group(1)
+            # Must be printable ASCII
+            if not all(32 <= ord(c) < 127 for c in s):
+                continue
+            # Skip base64-looking strings and random alphanumeric
+            if re.match(r'^[A-Za-z0-9+/=]{6,}$', s):
+                continue
+            if re.match(r'^[A-Za-z][a-z0-9]{2,}[A-Z][a-z0-9]*$', s):
+                continue
+
+            # API method names
+            if s in API:
+                add(f'-- VM uses API: {s}')
+                continue
+
+            # Utility names
+            if s in UTILITY:
+                add(f'-- VM uses: {s}')
+                continue
+
+            # Roblox API names not in our set
+            if s in ('Instance', 'game', 'workspace', 'Enum', 'task', 'coroutine',
+                     'Color3', 'Vector3', 'Vector2', 'UDim2', 'UDim', 'CFrame',
+                     'TweenInfo', 'Rect', 'Font', 'NumberSequence', 'ColorSequence',
+                     'NumberRange', 'RaycastParams', 'PhysicalProperties',
+                     'Players', 'ReplicatedStorage', 'RunService', 'UserInputService',
+                     'TweenService', 'Lighting', 'StarterGui', 'HttpService',
+                     'DataStoreService', 'MarketplaceService', 'CollectionService',
+                     'PathfindingService', 'SoundService', 'TextService',
+                     'GuiService', 'CoreGui', 'VirtualUser', 'ContentProvider'):
+                add(f'-- VM references: {s}')
+                continue
+
+            # String constants that look like messages, property values, identifiers
+            if len(s) >= 4 and len(s) <= 120:
+                # Property names
+                if re.match(r'^[A-Z][a-zA-Z0-9]*$', s) and s[0].isupper():
+                    if s not in ('true', 'false', 'nil', 'then', 'else', 'end', 'do',
+                                 'local', 'function', 'return', 'if', 'while', 'for',
+                                 'in', 'not', 'and', 'or', 'repeat', 'until', 'break'):
+                        # Could be a property name, Enum member, or class name
+                        if s in ('ScreenGui', 'Frame', 'TextLabel', 'TextButton',
+                                 'UICorner', 'UIPadding', 'UIStroke', 'UIListLayout',
+                                 'UIGridLayout', 'ImageLabel', 'ImageButton',
+                                 'ScrollingFrame', 'ViewportFrame', 'CanvasGroup',
+                                 'BillboardGui', 'SurfaceGui', 'Folder',
+                                 'RemoteEvent', 'RemoteFunction', 'BindableEvent',
+                                 'BindableFunction', 'ObjectValue', 'StringValue',
+                                 'BoolValue', 'IntValue', 'NumberValue',
+                                 'Humanoid', 'Part', 'Model', 'Workspace',
+                                 'Camera', 'LocalScript', 'Script', 'ModuleScript'):
+                            add(f'-- VM creates/references class: {s}')
+                        elif any(x in s for x in ['Color', 'Size', 'Position', 'Text',
+                                                    'Font', 'Visible', 'Enabled', 'Name',
+                                                    'Parent', 'Value', 'Transparency',
+                                                    'Anchor', 'Border', 'Layout', 'ZIndex',
+                                                    'Background', 'Offset', 'Scale']):
+                            add(f'-- VM sets property: {s}')
+                        elif '.' in s and s.split('.')[0] in ('Font', 'Enum', 'TweenInfo'):
+                            add(f'-- VM uses: {s}')
+                        else:
+                            add(f'-- VM identifier: {s}')
+                    continue
+
+                # Messages / display text (contains spaces or special chars)
+                if any(c in s for c in [' ', '!', '?', '.', ':', '/', '\\', '%']) and not s.startswith('end'):
+                    # Skip code-like strings (VM internal operations)
+                    if re.match(r'^[a-z]=', s) or re.match(r'^[a-z][A-Z]', s):
+                        continue
+                    # Skip strings that look like VM bytecode fragments
+                    if '=' in s and any(kw in s for kw in ['q[o]', 'q[S]', 'p[r[', 'q=p[r',
+                                                          'q<', 'q and', 'q or', 'q=U',
+                                                          'end else', 'end end', 'end if']):
+                        continue
+                    # Skip strings with too many VM-like patterns (generic variable names)
+                    vm_var_count = sum(1 for c in s if c == '=' )
+                    short_assign = len(re.findall(r'[a-wyz][\[=]', s))
+                    if vm_var_count >= 3 or short_assign >= 4:
+                        continue
+                    if 'Tamper' in s or 'error' in s.lower() or 'warn' in s.lower():
+                        add(f'-- Anti-tamper check: "{s}"')
+                    elif any(kw in s.lower() for kw in ['http', '://', 'www.', '.com', '.io', '.gg']):
+                        add(f'-- URL detected: "{s}"')
+                    elif re.match(r'^%[sdifgoxq]', s) or '%' in s:
+                        add(f'string.format("{s}", ...)')
+                    elif len(s) >= 8 and s.count(' ') >= 1:
+                        alpha_count = sum(1 for c in s if c.isalpha())
+                        if alpha_count >= len(s) * 0.6:
+                            add(f'-- String constant: "{s}"')
+
+        # Also extract any remaining c() calls that we can evaluate
+        for m in re.finditer(r'c\(([^)]+)\)', decoded_cff):
+            expr = m.group(1).strip()
+            val = eval_arith(expr)
+            if val is not None and abs(val) < 10000000:
+                # These are unresolved accessor calls - note them
+                pass
+
+        return lines
 
     # ============================================================
     # Phase 4: Deep body mining (v5.2 NEW)
@@ -1496,27 +1738,35 @@ class WeAreDevDeobfuscator:
     @staticmethod
     def _clean_chain(chain: str, service_names: set, last_service_var: str = None) -> str:
         result = chain
-        if 'game.GetService()' in result:
+        # v5.3: Remove game.GetService() prefix first
+        while 'game.GetService()' in result:
             parts = result.split('game.GetService()', 1)
             rest = parts[1] if len(parts) > 1 else ''
-            if rest.startswith('.'): rest = rest[1:]
+            if rest.startswith('.'):
+                rest = rest[1:]
+            # Check if the next segment is a service name
             first_seg = rest.split('.')[0] if rest else ''
             for svc in service_names:
                 if first_seg == svc or rest.startswith(svc + '.'):
-                    result = rest
+                    rest = rest[len(svc):]
+                    if rest.startswith('.'):
+                        rest = rest[1:]
                     break
-            else:
-                # v5.2: Don't prepend last_service_var — just use the rest as-is
-                result = rest if rest else result
-        # v5.2: Clean service name prefixes
-        if result != chain:
-            return result
+            result = rest if rest else result
+            break  # Only strip once
+        # v5.3: Clean service-name prefixes (e.g., "PlayersLocalPlayer" -> "LocalPlayer")
         for svc in sorted(service_names, key=len, reverse=True):
-            if result.startswith(svc) and len(result) > len(svc):
+            if result.startswith(svc):
                 rest = result[len(svc):]
-                if rest.startswith('.'): rest = rest[1:]
-                result = rest
-                break
+                if not rest or rest[0] == '.':
+                    result = rest[1:] if rest.startswith('.') else rest
+                    break
+        # v5.3: Convert dot method calls to colon where appropriate
+        COLON_METHODS = WeAreDevDeobfuscator.COLON_METHODS
+        for method in COLON_METHODS:
+            pattern = '.' + method + '('
+            replacement = ':' + method + '('
+            result = result.replace(pattern, replacement)
         return result
 
     @staticmethod
@@ -1597,7 +1847,20 @@ class WeAreDevDeobfuscator:
                 pending_value = stripped
                 pending_value_type = 'Enum'
                 continue
-            # v5.2: Connect with optional args (handle both .Connect and :Connect)
+            # v5.3: Connect with optional args (handle both .Connect and :Connect)
+            # Also handle Instance.new() connect (add comment about missing target)
+            m = re.match(r'Instance\.new\(\)\.([\w.]+):Connect\(\{\},\s*function\)', stripped)
+            if m:
+                event_name = m.group(1)
+                # Close any open connect
+                if connect_stack:
+                    lines.append('    -- [event handler body requires Roblox environment]')
+                    lines.append('end)')
+                    connect_stack.pop()
+                lines.append(f'-- [{event_name} event handler registered]')
+                lines.append(f'-- [handler body not executed during trace]')
+                pending_value = pending_value_type = None
+                continue
             m = re.match(r'(.+?)[.:]Connect\(\{\},\s*function\(([^)]*)\)\)', stripped)
             if not m:
                 m = re.match(r'(.+?)[.:]Connect\(\{\},\s*function\)', stripped)
@@ -1606,6 +1869,7 @@ class WeAreDevDeobfuscator:
                 args = m.group(2).strip() if len(m.groups()) > 1 and m.group(2) else ''
                 chain = WeAreDevDeobfuscator._clean_chain(chain, service_names, last_service_var)
                 if connect_stack:
+                    lines.append('    -- [event handler body requires Roblox environment]')
                     lines.append('end)')
                     connect_stack.pop()
                 if args:
@@ -1613,6 +1877,17 @@ class WeAreDevDeobfuscator:
                 else:
                     lines.append(f'{chain}:Connect(function()')
                 connect_stack.append(chain)
+                pending_value = pending_value_type = None
+                continue
+            # v5.3: Handle game.GetService().X.Y chains (from remaining trace entries)
+            m = re.match(r'game\.GetService\(\)\.([\w.]+)$', stripped)
+            if m:
+                chain = m.group(1)
+                chain = WeAreDevDeobfuscator._clean_chain(chain, service_names, last_service_var)
+                first_part = chain.split('.')[0] if chain else ''
+                # v5.3: Don't create false service references for non-service names
+                if first_part and first_part not in ('LocalPlayer', 'Character', 'Humanoid', 'Workspace'):
+                    lines.append(f'local {first_part} = game:GetService("{first_part}")')
                 pending_value = pending_value_type = None
                 continue
             m = re.match(r'game\.GetService\(\)\.([\w.]+)\.([\w]+)\(\{\},\s*(.+)\)', stripped)
@@ -1653,10 +1928,18 @@ class WeAreDevDeobfuscator:
                 if pending_value and '=' in stripped:
                     pending_value = pending_value_type = None
                 continue
-            # v5.2: Clean service prefixes in any remaining trace entries
+            # v5.3: Clean service prefixes and game.GetService() from remaining entries
             cleaned = stripped
             cleaned = cleaned.replace('({}, ', '(').replace(', {})', ')')
             cleaned = cleaned.replace('{}', '').strip()
+            # v5.3: Remove game.GetService() prefix
+            if cleaned.startswith('game.GetService().'):
+                rest = cleaned[len('game.GetService().'):]
+                for svc in service_names:
+                    if rest.startswith(svc + '.'):
+                        rest = rest[len(svc)+1:]
+                        break
+                cleaned = rest
             # Clean service-name prefixes from trace entries
             for svc in service_names:
                 if cleaned.startswith(svc) and len(cleaned) > len(svc) and cleaned[len(svc)] in ('.', ''):
@@ -1683,6 +1966,7 @@ class WeAreDevDeobfuscator:
                 if val == 'nil' and prop in ('BackgroundColor3', 'TextColor3') and pending_value: val = pending_value
                 lines.append(f'{current_inst}.{prop} = {val}')
         while connect_stack:
+            lines.append('    -- [event handler body requires Roblox environment]')
             lines.append('end)')
             connect_stack.pop()
         has_print = any(l.strip().startswith('print(') for l in lines)
@@ -1723,26 +2007,38 @@ class WeAreDevDeobfuscator:
             if line and line not in seen:
                 seen.add(line)
                 lines.append(line)
+        sa = WeAreDevDeobfuscator._simplify_arith_in_code
         for m in re.finditer(r'local function (\w+)', resolved_cff):
             add(f'local function {m.group(1)}(...)\n    -- [body requires Roblox environment]\nend')
         for m in re.finditer(r'(?<!local )function (\w+)', resolved_cff):
             add(f'function {m.group(1)}(...)\n    -- [body requires Roblox environment]\nend')
         for m in re.finditer(r'local (\w+)\s*=\s*require', resolved_cff):
             add(f'local {m.group(1)} = require(...)')
+        # v5.3: Simplified for loops
         for m in re.finditer(r'for (\w+)\s*=\s*(.+?)\s*,\s*(.+?)\s+do', resolved_cff):
-            add(f'for {m.group(1)} = {m.group(2)}, {m.group(3)} do')
+            var, start, limit = m.group(1), sa(m.group(2).strip()), sa(m.group(3).strip())
+            add(f'for {var} = {start}, {limit} do')
         for m in re.finditer(r'for (\w+)(?:,\s*\w+)?\s+in\s+(pairs|ipairs)\((.+?)\)\s+do', resolved_cff):
             add(f'for {m.group(1)} in {m.group(2)}({m.group(3)}) do')
+        # v5.3: Simplified while loops
         for m in re.finditer(r'while (.+?)\s+do', resolved_cff):
-            cond = m.group(1).strip()
+            cond = sa(m.group(1).strip())
             if len(cond) < 100 and 'true' not in cond:
                 add(f'while {cond} do')
+        # v5.3: Simplified if conditions (limit to avoid VM dispatch spam)
+        if_count = 0
         for m in re.finditer(r'if (.+?)\s+then', resolved_cff):
-            cond = m.group(1).strip()
+            cond = sa(m.group(1).strip())
             if len(cond) < 100:
+                # Skip trivial single-variable VM dispatch conditions
+                if re.match(r'^[a-z]\s*[<>=!]+\s*\d+$', cond):
+                    continue
                 add(f'if {cond} then')
+                if_count += 1
+                if if_count >= 20:
+                    break
         for m in re.finditer(r'return (.+)', resolved_cff):
-            val = m.group(1).strip()
+            val = sa(m.group(1).strip())
             if len(val) < 100:
                 add(f'return {val}')
         for m in re.finditer(r'(\w+)\.(\w+)\s*=\s*("[^"]{2,}")', resolved_cff):
@@ -1838,7 +2134,217 @@ class WeAreDevDeobfuscator:
         return WeAreDevDeobfuscator._mine_cff_code(resolved_cff)
 
     # ============================================================
-    # Phase 6: Output generation (v5.2 UPGRADED)
+    # Phase 4.6: CFF Block Extraction (v5.4 NEW)
+    # ============================================================
+
+    @staticmethod
+    def _find_block_end(code: str, start: int) -> int:
+        """Find matching 'end' for a for/while/if/function block starting at start."""
+        depth = 1
+        i = start
+        n = len(code)
+        in_str = False
+        while i < n:
+            c = code[i]
+            if in_str:
+                if c == '\\' and i + 1 < n:
+                    i += 2
+                    continue
+                if c == '"':
+                    in_str = False
+                i += 1
+                continue
+            if c == '"':
+                in_str = True
+                i += 1
+                continue
+            if c == '-' and i + 1 < n and code[i+1] == '-':
+                while i < n and code[i] != '\n':
+                    i += 1
+                continue
+            # Count block openers/closers
+            if code[i:i+3] == 'end':
+                after = code[i+3:i+4] if i+3 < n else ''
+                if not after.isalnum() and after != '_':
+                    depth -= 1
+                    if depth == 0:
+                        return i
+            # Check for nested blocks (for, while, if, function, do, repeat)
+            for kw in ('function', 'for', 'while', 'repeat'):
+                if code[i:i+len(kw)] == kw:
+                    before_ok = (i == 0 or not code[i-1].isalnum()) and (code[i-1:i] != '.')
+                    after_ok = (i+len(kw) >= n or not code[i+len(kw)].isalnum()) and (code[i+len(kw):i+len(kw)+1] != ':')
+                    if before_ok and after_ok:
+                        if kw == 'function':
+                            depth += 1
+                        elif kw in ('for', 'while'):
+                            # Check for 'do' keyword
+                            do_pos = code.find('do', i)
+                            if do_pos > 0 and do_pos - i < 80:
+                                depth += 1
+                        elif kw == 'repeat':
+                            depth += 1
+                        break
+            if code[i:i+2] == 'do':
+                before_ok = (i == 0 or not code[i-1].isalnum()) and (code[i-1:i] != '.')
+                after_ok = (i+2 >= n or not code[i+2].isalnum())
+                if before_ok and after_ok:
+                    depth += 1
+            i += 1
+        return -1
+
+    @staticmethod
+    def _is_vm_internal(block: str) -> bool:
+        """Filter out VM-internal blocks (swap, b64 decode, dispatch)."""
+        # Skip swap loops (P-table reordering)
+        if 'ipairs({{' in block and '}},{' in block:
+            return True
+        if re.search(r'ipairs\(\{\{\d+', block):
+            return True
+        # Skip 4-element swap assignments
+        if re.search(r'\w+\[\w+\]\s*,\s*\w+\[\w+\]\s*,\s*\w+\[\w+\]\s*,\s*\w+\[\w+\]', block):
+            return True
+        # Skip b64 decode loop
+        if 'string.char' in block and ('64)^(' in block or 'string.sub' in block):
+            return True
+        # Skip giant if/elseif dispatch chains
+        if block.count('elseif') > 3:
+            return True
+        # Skip blocks that are pure VM register operations (single-letter vars, obfuscated arithmetic)
+        # VM register blocks typically have patterns like: g=y L=1 q=L j=q<L
+        vm_reg_count = 0
+        for line in block.split('\n'):
+            line = line.strip()
+            # Lines like: single_letter=single_letter or single_letter=single_letter+number
+            if re.match(r'^[a-z]\s*[=<>!]', line) or re.match(r'^[a-z]\s*$', line):
+                vm_reg_count += 1
+        non_vm_lines = sum(1 for line in block.split('\n')
+                            if line.strip() and not re.match(r'^[a-z]\s*[=<>!]', line.strip())
+                            and line.strip() not in ('end', 'do', 'then'))
+        if vm_reg_count > 4 and non_vm_lines < 3:
+            return True
+        # Skip blocks with binary garbage strings
+        binary_strings = 0
+        for m in re.finditer(r'"([^"]{2,})"', block):
+            s = m.group(1)
+            if any(ord(c) > 127 for c in s):
+                binary_strings += 1
+        if binary_strings >= 2:
+            return True
+        # Skip blocks where most content is obfuscated arithmetic (large numbers +/- large numbers)
+        arith_count = len(re.findall(r'\d{5,}[+-]\d{5,}', block))
+        total_content = len(block.replace(' ', '').replace('\n', ''))
+        if total_content > 0 and arith_count > 5 and arith_count / (total_content / 50) > 0.3:
+            return True
+        return False
+
+    @staticmethod
+    def _extract_cff_blocks(decoded_cff: str, string_map: Dict[int, str] = None) -> List[str]:
+        """v5.4: Extract COMPLETE code blocks from CFF-resolved code.
+        Returns full loop bodies, function bodies, and if/then blocks."""
+        if not decoded_cff:
+            return []
+        blocks = []
+        seen = set()
+        sa = WeAreDevDeobfuscator._simplify_arith_in_code
+
+        def add(block):
+            block = block.strip()
+            if not block or len(block) < 15:
+                return
+            key = block[:100]
+            if key in seen:
+                return
+            seen.add(key)
+            if not WeAreDevDeobfuscator._is_vm_internal(block):
+                blocks.append(block)
+
+        # Numeric for loops
+        for m in re.finditer(r'for\s+(\w+)\s*=\s*(.+?)\s*,\s*(.+?)(?:\s*,\s*(.+?))?\s+do', decoded_cff):
+            var, s_e, l_e, st_e = m.group(1), m.group(2).strip(), m.group(3).strip(), m.group(4)
+            header = 'for %s = %s, %s' % (var, sa(s_e), sa(l_e))
+            if st_e:
+                header += ', %s' % sa(st_e.strip())
+            header += ' do'
+            end_p = WeAreDevDeobfuscator._find_block_end(decoded_cff, m.end())
+            if end_p > 0:
+                body = decoded_cff[m.end():end_p+3].strip()
+                if len(body) < 600:
+                    add(header + '\n    ' + '\n    '.join(body.split('\n')) + '\nend')
+
+        # for...in loops
+        for m in re.finditer(r'for\s+(\w+)(?:,\s*\w+)?\s+in\s+(pairs|ipairs|next)\((.+?)\)\s+do', decoded_cff):
+            var, it_fn, it_arg = m.group(1), m.group(2), sa(m.group(3).strip())
+            header = 'for %s in %s(%s) do' % (var, it_fn, it_arg)
+            end_p = WeAreDevDeobfuscator._find_block_end(decoded_cff, m.end())
+            if end_p > 0:
+                body = decoded_cff[m.end():end_p+3].strip()
+                if len(body) < 600:
+                    add(header + '\n    ' + '\n    '.join(body.split('\n')) + '\nend')
+
+        # while loops
+        w_count = 0
+        for m in re.finditer(r'while\s+(.+?)\s+do', decoded_cff):
+            cond = sa(m.group(1).strip())
+            if len(cond) > 120:
+                continue
+            header = 'while %s do' % cond
+            end_p = WeAreDevDeobfuscator._find_block_end(decoded_cff, m.end())
+            if end_p > 0:
+                body = decoded_cff[m.end():end_p+3].strip()
+                if 10 < len(body) < 600:
+                    add(header + '\n    ' + '\n    '.join(body.split('\n')) + '\nend')
+                    w_count += 1
+                    if w_count >= 20:
+                        break
+
+        # Function definitions
+        for m in re.finditer(r'(local\s+)?function\s+(\w+)\s*\(([^)]*)\)', decoded_cff):
+            prefix = m.group(1) or ''
+            fname = m.group(2)
+            params = m.group(3)
+            if len(fname) == 1 and fname.islower():
+                continue
+            header = '%sfunction %s(%s)' % (prefix, fname, params)
+            end_p = WeAreDevDeobfuscator._find_block_end(decoded_cff, m.end())
+            if end_p > 0:
+                body = decoded_cff[m.end():end_p+3].strip()
+                if 20 < len(body) < 2000:
+                    body_s = sa(body)
+                    add(header + '\n    ' + '\n    '.join(body_s.split('\n')) + '\nend')
+
+        # if/then blocks (limit to avoid dispatch spam)
+        if_n = 0
+        for m in re.finditer(r'if\s+(.+?)\s+then', decoded_cff):
+            cond = sa(m.group(1).strip())
+            if len(cond) > 100:
+                continue
+            if re.match(r'^[a-z]\s*[<>=!]+\s*\d+$', cond):
+                continue
+            header = 'if %s then' % cond
+            end_p = WeAreDevDeobfuscator._find_block_end(decoded_cff, m.end())
+            if end_p > 0:
+                body = decoded_cff[m.end():end_p+3].strip()
+                if 10 < len(body) < 400:
+                    add(header + '\n    ' + '\n    '.join(body.split('\n')) + '\nend')
+                    if_n += 1
+                    if if_n >= 30:
+                        break
+
+        # repeat...until
+        for m in re.finditer(r'repeat\b', decoded_cff):
+            until_p = decoded_cff.find('until', m.end())
+            if 0 < until_p - m.end() < 500:
+                body = decoded_cff[m.end():until_p].strip()
+                until_cond = decoded_cff[until_p+5:until_p+100].split('\n')[0].strip()
+                if until_cond:
+                    until_cond = sa(until_cond)
+                    add('repeat\n    %s\nuntil %s' % (body, until_cond))
+
+        return blocks
+
+    # ============================================================
+    # Phase 6: Output generation (v5.4 UPGRADED)
     # ============================================================
 
     @staticmethod
@@ -1847,7 +2353,9 @@ class WeAreDevDeobfuscator:
                                string_map: Dict[int, str], verbose: bool,
                                m_offset: int = 5713, accessor_name: str = 'M',
                                cff_code: List[str] = None, structure_code: List[str] = None,
-                               body_code: List[str] = None) -> str:
+                               body_code: List[str] = None,
+                               opcode_strings: List[str] = None,
+                               cff_blocks: List[str] = None) -> str:
         lines = []
         meaningful = {}
         for idx in sorted(P_decoded.keys()):
@@ -1856,20 +2364,38 @@ class WeAreDevDeobfuscator:
             if re.match(r'^[A-Za-z0-9]{8,20}$', s): continue
             meaningful[idx] = s
         has_recon = reconstructed and len(reconstructed.strip()) > 0
-        has_any = has_recon or (cff_code and len(cff_code) > 0) or (body_code and len(body_code) > 0)
+        has_any = (has_recon or (cff_code and len(cff_code) > 0) or
+                   (body_code and len(body_code) > 0) or
+                   (opcode_strings and len(opcode_strings) > 0) or
+                   (cff_blocks and len(cff_blocks) > 0))
         if has_any:
-            lines.append('-- [[ Deobfuscated by Lua Deobfuscator Bot v5.2+ ]]')
-            lines.append('-- Method: P-table + VM trace + balanced CFF + deep mining + smart naming')
+            lines.append('-- [[ Deobfuscated by Lua Deobfuscator Bot v5.4 ]]')
+            lines.append('-- Method: P-table + VM trace + CFF blocks + enhanced tracer + opcode analysis')
             lines.append(f'-- P-table: {len(P_decoded)} entries, {len(meaningful)} meaningful strings')
             lines.append('')
         if has_recon:
             lines.append('-- === RECONSTRUCTED SOURCE ===')
             lines.append(reconstructed)
             lines.append('')
+        # v5.3: Opcode analysis section (most informative for complex scripts)
+        if opcode_strings:
+            existing = set()
+            if has_recon:
+                for rl in reconstructed.split('\n'):
+                    existing.add(rl.strip())
+                    existing.add(rl.strip().lstrip('-- '))
+            unique = [os for os in opcode_strings if os.strip() not in existing]
+            if unique:
+                lines.append('-- === VM OPCODE ANALYSIS ===')
+                lines.append('-- [Strings and API methods used by the VM internally]')
+                for os in unique: lines.append(os)
+                lines.append('')
         if body_code:
             existing = set()
             if has_recon:
                 for rl in reconstructed.split('\n'): existing.add(rl.strip())
+            if opcode_strings:
+                for os in opcode_strings: existing.add(os.strip().lstrip('-- '))
             unique = [bl for bl in body_code if bl.strip() not in existing]
             if unique:
                 lines.append('-- === ADDITIONAL PATTERNS (deep body mining) ===')
@@ -1879,6 +2405,8 @@ class WeAreDevDeobfuscator:
             existing = set()
             if has_recon:
                 for rl in reconstructed.split('\n'): existing.add(rl.strip().lstrip('local ').lstrip('-- '))
+            if opcode_strings:
+                for os in opcode_strings: existing.add(os.strip().lstrip('-- '))
             unique = []
             for cl in cff_code:
                 cs = cl.strip().lstrip('local ').lstrip('-- ')
@@ -1897,12 +2425,39 @@ class WeAreDevDeobfuscator:
                 for cl in cff_code: existing.add(cl.strip())
             if body_code:
                 for bl in body_code: existing.add(bl.strip())
+            if opcode_strings:
+                for os in opcode_strings: existing.add(os.strip().lstrip('-- '))
             unique = [sl for sl in structure_code if sl.strip() not in existing]
             if unique:
                 lines.append('-- === CODE STRUCTURE ===')
                 for sl in unique: lines.append(sl)
                 lines.append('')
-        if not has_recon and not cff_code and not body_code:
+        # v5.4: Complete code blocks (loop bodies, function bodies, if/then blocks)
+        if cff_blocks:
+            existing = set()
+            if has_recon:
+                for rl in reconstructed.split('\n'):
+                    existing.add(rl.strip())
+                    existing.add(rl.strip().lstrip('-- '))
+            if cff_code:
+                for cl in cff_code: existing.add(cl.strip())
+            if structure_code:
+                for sl in structure_code: existing.add(sl.strip())
+            if body_code:
+                for bl in body_code: existing.add(bl.strip())
+            if opcode_strings:
+                for os in opcode_strings: existing.add(os.strip().lstrip('-- '))
+            unique = []
+            for blk in cff_blocks:
+                blk_s = blk.strip()
+                first_line = blk_s.split('\n')[0].strip()
+                if first_line not in existing and blk_s not in existing:
+                    unique.append(blk)
+            if unique:
+                lines.append('-- === EXTRACTED CODE BLOCKS (loops, functions, conditions) ===')
+                for blk in unique: lines.append(blk)
+                lines.append('')
+        if not has_recon and not cff_code and not body_code and not opcode_strings and not cff_blocks:
             if prints:
                 lines.append('-- === PRINT OUTPUT ===')
                 for p in prints:
@@ -1911,7 +2466,7 @@ class WeAreDevDeobfuscator:
                 lines.append('')
             else:
                 lines.append('-- Source reconstruction incomplete.')
-                lines.append('-- The script uses API calls that require a Roblox environment.')
+                lines.append('-- The script uses a stack-based VM; full decompilation requires VM simulation.')
                 lines.append('')
         if meaningful:
             lines.append('-- === DECODED STRING CONSTANTS ===')
@@ -2211,7 +2766,7 @@ bot.remove_command('help')
 @bot.command(name="help")
 async def help_cmd(ctx: commands.Context):
     embed = discord.Embed(
-        title="Lua Deobfuscator Bot v5.2",
+        title="Lua Deobfuscator Bot v5.4",
         description="Commands:",
         color=0x5865F2,
     )
