@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 # ============================================================
 # CONFIGURATION
 # ============================================================
-DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
+DISCORD_BOT_TOKEN = os.environ.get("DISCORD_TOKEN")
 LUA51_BIN = '/tmp/lua-5.1.5/src/lua'
 ROBLOX_ENV_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'roblox_env.lua')
 MAX_FILE_SIZE = 500_000  # 500KB max
