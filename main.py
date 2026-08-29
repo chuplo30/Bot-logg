@@ -18,6 +18,25 @@ import tempfile
 import shutil
 from pathlib import Path
 from urllib.parse import urlparse
+import os
+from flask import Flask
+from threading import Thread
+
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is running!"
+
+def run():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.daemon = True
+    t.start()
+
 
 # ============================================================
 # CONFIGURATION
@@ -29,6 +48,7 @@ MAX_FILE_SIZE = 500_000  # 500KB max
 MAX_URL_SIZE = 1_000_000
 
 intents = discord.Intents.default()
+intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 # discord.py command tree setup is done via @bot.tree(), remove standalone tree
 # tree = app_commands.CommandTree()
@@ -787,5 +807,6 @@ if __name__ == '__main__':
         else:
             print('Usage: python main.py <file.lua|url>')
     else:
-        print(f'Starting Discord bot...')
-        bot.run(DISCORD_BOT_TOKEN)
+print("Starting Discord bot...")
+keep_alive()
+bot.run(DISCORD_BOT_TOKEN)
