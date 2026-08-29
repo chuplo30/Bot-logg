@@ -248,6 +248,9 @@ class ObfuscatorDetector:
                     return name
         if cls._is_luaobfuscator_ferib(code):
             return "LuaObfuscator.com (Ferib)"
+        # v5.2: structural WeAreDev detection (works WITHOUT header comment)
+        if cls._is_wearedev_structural(code):
+            return "WeAreDev"
         # v5: IronBrew (v1) needs "LOL!" but NOT in a Ferib context
         if "LOL!" in code and "IronBrew-2.0" not in code:
             if not cls._is_luaobfuscator_ferib(code):
@@ -259,6 +262,60 @@ class ObfuscatorDetector:
         if cls._is_base64_compressed(code):
             return "Base64+Compressed"
         return None
+
+    @classmethod
+    def _is_wearedev_structural(cls, code: str) -> bool:
+        """v5.2: Detect WeAreDev v1.0.0 by structural patterns (no header needed).
+
+        WeAreDev v1.0.0 has very distinctive structural fingerprints:
+        1. return(function(...)) at start
+        2. Large P-table with \\ddd decimal-escape strings
+        3. Swap loop: for x,y in ipairs({...}) while ... do F[..],F[..],k[..],k[..]=... end end
+        4. Base64 char mapping table with ["\\0NN"] digit keys
+        5. Accessor function: local function x(n) return P[n-(expr)]end
+        6. "string" type check as \\115\\116\\114\\105\\110\\103
+        7. Final return with getfenv/unpack/newproxy/setmetatable/getmetatable/select
+        """
+        score = 0
+
+        # 1. return(function(...)) at the very start
+        if re.match(r'\s*return\s*\(function\s*\(\.\.\.\)', code):
+            score += 3
+
+        # 2. Large number of decimal-escape sequences (\\ddd)
+        decimal_esc_count = len(re.findall(r'\\\d{3}', code))
+        if decimal_esc_count > 300:
+            score += 2
+
+        # 3. Swap loop with ipairs and range reversal pattern
+        if re.search(r'for\s+\w+,\w+\s+in\s+ipairs\s*\(\{', code):
+            if re.search(r'\w+\[\w+\],\w+\[\w+\],\w+\[\w+\],\w+\[\w+\]\s*=\s*\w+\[\w+\],\w+\[\w+\],\w+\[\w+\][+-]\d+,\w+\[\w+\][+-]\d+', code):
+                score += 3
+
+        # 4. Base64 char table with digit keys ["\\048"] through ["\\057"]
+        digit_key_count = len(re.findall(r'\["\\0[4-5]\\d"\]', code))
+        if digit_key_count >= 6:
+            score += 2
+
+        # 5. Accessor function: local function x(n) return T[n-(expr)]end
+        if re.search(r'local function\s+\w+\(\w+\)\s*return\s+\w+\[\w+\s*[+-]', code):
+            score += 2
+
+        # 6. "string" as decimal escape \\115\\116\\114\\105\\110\\103
+        if '\\115\\116\\114\\105\\110\\103' in code:
+            score += 2
+
+        # 7. Final return with getfenv/unpack/newproxy/setmetatable/getmetatable/select
+        if re.search(r'end\)\(getfenv\s+and\s+getfenv\(\)\s*or\s*_ENV', code):
+            if 'newproxy' in code and 'setmetatable' in code and 'getmetatable' in code:
+                score += 2
+
+        # 8. String decoder loop with type check and string.char/table.concat
+        if 'string.char' in code and 'table.concat' in code and 'string.len' in code:
+            if 'string.sub' in code and 'math.floor' in code:
+                score += 1
+
+        return score >= 7
 
     @classmethod
     def _is_luaobfuscator_ferib(cls, code: str) -> bool:
@@ -1045,17 +1102,23 @@ class WeAreDevDeobfuscator:
         # Phase 4: Reconstruct source from trace
         reconstructed = WeAreDevDeobfuscator._reconstruct_source(trace, prints, string_map, resolved_cff)
 
-        # Phase 5: Generate CLEAN output (v5: only reconstructed source, no junk)
+        # Phase 4b: v5.2 - Mine resolved CFF for additional code patterns
+        cff_code = WeAreDevDeobfuscator._mine_cff_code(resolved_cff, string_map)
+        if verbose:
+            print(f"  [*] CFF mining: {len(cff_code)} additional code patterns")
+
+        # Phase 5: Generate CLEAN output (v5.2: trace + CFF code + string analysis)
         source = WeAreDevDeobfuscator._generate_clean_output(
             reconstructed, trace, prints, errors, P_decoded,
-            string_map, verbose, m_offset, accessor_name)
+            string_map, verbose, m_offset, accessor_name, cff_code)
 
         meta = {
-            "method": "P-table decode + traced VM execution + source reconstruction",
+            "method": "P-table decode + traced VM + CFF mining + source reconstruction",
             "p_entries": len(P_decoded),
             "strings_decoded": len(real_strings),
             "print_count": len(prints),
             "trace_entries": len(trace),
+            "cff_code_patterns": len(cff_code),
             "reconstructed_lines": len(reconstructed.split('\n')) if reconstructed else 0,
         }
 
@@ -1606,43 +1669,108 @@ class WeAreDevDeobfuscator:
         return '\n'.join(lines)
 
     @staticmethod
-    def _extract_code_from_cff(resolved_cff: str) -> List[str]:
-        """v5: Extract meaningful code patterns from resolved CFF.
+    def _mine_cff_code(resolved_cff: str, string_map: Dict[int, str] = None) -> List[str]:
+        """v5.2: Mine resolved CFF for additional code patterns.
 
-        This helps when the VM trace is sparse but the CFF resolution
-        revealed the actual API calls and string operations.
+        After string resolution, the CFF contains string literals that reveal
+        the actual API calls and code structure. This method extracts
+        meaningful code patterns that the VM trace may have missed.
         """
         if not resolved_cff:
             return []
 
         code_lines = []
-
-        # Look for patterns like: game:GetService("X"), Instance.new("X"), etc.
-        # These are now visible in the resolved CFF as string literals
-        patterns = [
-            # game:GetService("...")
-            (r'(?:game|_G)[^\n]*:GetService\("([^"]+)"\)',
-             lambda m: f'game:GetService("{m.group(1)}")'),
-            # Instance.new("...")
-            (r'Instance[.]new\("([^"]+)"\)',
-             lambda m: f'Instance.new("{m.group(1)}")'),
-            # WaitForChild("...")
-            (r':WaitForChild\("([^"]+)"\)',
-             lambda m: f':WaitForChild("{m.group(1)}")'),
-            # FindFirstChild("...")
-            (r':FindFirstChild\("([^"]+)"\)',
-             lambda m: f':FindFirstChild("{m.group(1)}")'),
-        ]
-
         seen = set()
-        for pattern, formatter in patterns:
-            for m in re.finditer(pattern, resolved_cff):
-                line = formatter(m)
-                if line not in seen:
-                    seen.add(line)
-                    code_lines.append(line)
+
+        def add(line):
+            if line and line not in seen:
+                seen.add(line)
+                code_lines.append(line)
+
+        # Service acquisition
+        for m in re.finditer(r':GetService\("([^"]+)"\)', resolved_cff):
+            add(f'game:GetService("{m.group(1)}")')
+
+        # Instance creation
+        for m in re.finditer(r'Instance[.]new\("([^"]+)"\)', resolved_cff):
+            add(f'Instance.new("{m.group(1)}")')
+
+        # WaitForChild
+        for m in re.finditer(r':WaitForChild\("([^"]+)"\)', resolved_cff):
+            add(f':WaitForChild("{m.group(1)}")')
+
+        # FindFirstChild
+        for m in re.finditer(r':FindFirstChild\("([^"]+)"\)', resolved_cff):
+            add(f':FindFirstChild("{m.group(1)}")')
+
+        # FindFirstChildOfClass
+        for m in re.finditer(r':FindFirstChildOfClass\("([^"]+)"\)', resolved_cff):
+            add(f':FindFirstChildOfClass("{m.group(1)}")')
+
+        # v5.2: HttpGet/HttpPost URLs
+        for m in re.finditer(r'(?:HttpGet|HttpPost)\("(https?://[^"]+)"\)', resolved_cff):
+            add(f':HttpGet("{m.group(1)}")')
+
+        # v5.2: SetAttribute/GetAttribute
+        for m in re.finditer(r':SetAttribute\("([^"]+)"', resolved_cff):
+            add(f':SetAttribute("{m.group(1)}", ...)')
+        for m in re.finditer(r':GetAttribute\("([^"]+)"\)', resolved_cff):
+            add(f':GetAttribute("{m.group(1)}")')
+
+        # v5.2: OnServerEvent/OnClientEvent/InvokeServer/FireServer
+        for m in re.finditer(r'\.(OnServerEvent|OnClientEvent)\("([^"]+)"\)', resolved_cff):
+            add(f'.{m.group(1)}("{m.group(2)}")')
+        for m in re.finditer(r'\.(InvokeServer|FireServer)\("([^"]+)"\)', resolved_cff):
+            add(f':{m.group(1)}("{m.group(2)}")')
+
+        # v5.2: require() patterns
+        for m in re.finditer(r'require\("([^"]+)"\)', resolved_cff):
+            add(f'require("{m.group(1)}")')
+
+        # v5.2: Enum patterns
+        for m in re.finditer(r'Enum\.([A-Z]\w+\.[A-Z]\w+)', resolved_cff):
+            add(f'Enum.{m.group(1)}')
+
+        # v5.2: Text/Name property with meaningful values
+        for m in re.finditer(r'\.([Tt]ext|[Nn]ame)\s*=\s*"([^"]{2,})"', resolved_cff):
+            prop = m.group(1)
+            val = m.group(2)
+            if len(val) > 1 and not re.match(r'^[A-Za-z0-9]{8,}$', val):
+                add(f'.{prop} = "{val}"')
+
+        # v5.2: string.format with visible format strings
+        for m in re.finditer(r'string\.format\("([^"]{3,})"', resolved_cff):
+            fmt = m.group(1)
+            if '%' in fmt and len(fmt) < 200:
+                add(f'string.format("{fmt}", ...)')
+
+        # v5.2: error/warn/assert with messages
+        for m in re.finditer(r'(?:error|warn|assert)\("([^"]{5,})"', resolved_cff):
+            msg = m.group(1)
+            if len(msg) > 10 and not re.match(r'^[A-Za-z0-9]{8,}$', msg):
+                add(f'{m.group(0)}')
+
+        # v5.2: print() with string arguments
+        for m in re.finditer(r'print\("([^"]{5,})"\)', resolved_cff):
+            msg = m.group(1)
+            if len(msg) > 5 and not re.match(r'^[A-Za-z0-9]{8,}$', msg):
+                add(f'print("{msg}")')
+
+        # v5.2: TweenService:Create
+        tween_count = resolved_cff.count('TweenService')
+        if tween_count > 0 and ':Create(' in resolved_cff:
+            add('TweenService:Create(...)')
+
+        # v5.2: Asset IDs (numeric 8-12 digits)
+        for m in re.finditer(r'"(\d{8,12})"', resolved_cff):
+            add(f'-- Asset ID: {m.group(1)}')
 
         return code_lines
+
+    @staticmethod
+    def _extract_code_from_cff(resolved_cff: str) -> List[str]:
+        """v5: Extract code from CFF. (v5.2: delegates to _mine_cff_code)"""
+        return WeAreDevDeobfuscator._mine_cff_code(resolved_cff)
 
     @staticmethod
     def _generate_clean_output(reconstructed: str,
@@ -1653,24 +1781,52 @@ class WeAreDevDeobfuscator:
                                string_map: Dict[int, str],
                                verbose: bool,
                                m_offset: int = 5713,
-                               accessor_name: str = 'M') -> str:
-        """v5: Generate CLEAN output - only the reconstructed source code.
+                               accessor_name: str = 'M',
+                               cff_code: List[str] = None) -> str:
+        """v5.2: Generate CLEAN output - reconstructed source + CFF code + string analysis.
 
-        No junk obfuscator code (resolved_cff), no reference maps.
-        Just the clean, recovered Lua source.
+        Improvements over v5:
+        - Always include meaningful decoded strings (not just verbose mode)
+        - Include CFF-mined code patterns
+        - Better organization: trace code, then CFF code, then string refs
         """
         lines = []
-        # No header here - format_output() already adds the toolkit header
 
-        # PRIMARY: Reconstructed source code (THE MAIN OUTPUT)
+        # PRIMARY: Reconstructed source code from VM trace
         has_reconstructed = reconstructed and len(reconstructed.strip()) > 0
         if has_reconstructed:
             lines.append(reconstructed)
             lines.append('')
 
-        # FALLBACK: If no reconstruction, show what we do have
-        if not has_reconstructed:
-            # Try to build minimal source from prints
+        # SECONDARY: v5.2 - CFF-mined code patterns (not already in reconstruction)
+        if cff_code:
+            cff_unique = []
+            recon_set = set()
+            if has_reconstructed:
+                for rline in reconstructed.split('\n'):
+                    rline_stripped = rline.strip().lstrip('local ').lstrip('-- ')
+                    recon_set.add(rline_stripped)
+
+            for cl in cff_code:
+                cl_stripped = cl.strip().lstrip('local ').lstrip('-- ')
+                if cl_stripped in recon_set:
+                    continue
+                if cl.startswith('-- Asset ID:'):
+                    cff_unique.append(cl)
+                    continue
+                # Skip very generic patterns
+                if cl_stripped in (':sub(...)', ':find(...)', ':match(...)', ':gsub(...)'):
+                    continue
+                cff_unique.append(cl)
+
+            if cff_unique:
+                lines.append('-- Additional code patterns (from string analysis):')
+                for cl in cff_unique:
+                    lines.append(cl)
+                lines.append('')
+
+        # FALLBACK: If no reconstruction and no CFF code
+        if not has_reconstructed and not cff_code:
             if prints:
                 for p in prints:
                     try:
@@ -1681,26 +1837,24 @@ class WeAreDevDeobfuscator:
             else:
                 lines.append('-- Source reconstruction incomplete.')
                 lines.append('-- The script uses API calls that require a Roblox environment.')
-                lines.append('-- Decoded string constants are available in verbose mode (-v).')
-
+                lines.append('-- Decoded string constants are available below.')
             lines.append('')
 
-        # Only in verbose mode: append decoded strings as comments
-        if verbose:
-            meaningful = {}
-            for idx in sorted(P_decoded.keys()):
-                s = P_decoded[idx]
-                if not s or not s.strip():
-                    continue
-                if re.match(r'^[A-Za-z0-9]{8,20}$', s):
-                    continue
-                meaningful[idx] = s
+        # v5.2: ALWAYS include meaningful decoded strings (was verbose-only before)
+        meaningful = {}
+        for idx in sorted(P_decoded.keys()):
+            s = P_decoded[idx]
+            if not s or not s.strip():
+                continue
+            if re.match(r'^[A-Za-z0-9]{8,20}$', s):
+                continue
+            meaningful[idx] = s
 
-            if meaningful:
-                lines.append('-- Decoded strings:')
-                for idx, s in sorted(meaningful.items()):
-                    lines.append(f'--   [{idx}] = {repr(s)}')
-                lines.append('')
+        if meaningful:
+            lines.append('-- Decoded string constants:')
+            for idx, s in sorted(meaningful.items()):
+                lines.append(f'--   [{idx}] = {repr(s)}')
+            lines.append('')
 
         return '\n'.join(lines)
 
@@ -1995,7 +2149,7 @@ bot.remove_command('help')
 @bot.command(name="help")
 async def help_cmd(ctx: commands.Context):
     embed = discord.Embed(
-        title="Lua Deobfuscator Bot v5.1",
+        title="Lua Deobfuscator Bot v5.2",
         description="Commands:",
         color=0x5865F2,
     )
@@ -2011,7 +2165,7 @@ async def help_cmd(ctx: commands.Context):
     )
     embed.add_field(
         name="Supported obfuscators",
-        value="WeAreDev, IronBrew2, WAN OBFUSCATE, MoonSec V3, Clyde, AstroProtect, LuaObfuscator.com (Ferib), PSU, Luraph, Base64+Compress, Generic VM-based.",
+        value="WeAreDev (headerless detect), IronBrew2, WAN OBFUSCATE, MoonSec V3, Clyde, AstroProtect, LuaObfuscator.com (Ferib), PSU, Luraph, Base64+Compress, Generic VM-based.",
         inline=False,
     )
     embed.set_footer(text="Comments are stripped from the recovered source automatically.")
