@@ -493,7 +493,7 @@ async def fetch_lua_from_url(url: str) -> tuple:
 
 @bot.event
 async def on_ready():
-    await bot.sync()
+    await bot.tree.sync()
     print(f'Bot ready! Guilds: {len(bot.guilds)}')
 
 
