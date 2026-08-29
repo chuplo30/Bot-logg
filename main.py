@@ -1,9 +1,4 @@
-"""
-WeAreDev Obfuscator v5.5 - Discord Bot
-Deobfuscates ALL WeAreDev obfuscated Lua scripts to ~90% original source.
-Supports: P-table extraction, shuffle reversal, custom base64 decode,
-          Lua 5.1 execution fallback, string reconstruction, URL fetch.
-"""
+
 
 import discord
 from discord import app_commands
