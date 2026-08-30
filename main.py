@@ -1,4 +1,3 @@
-
 import re
 import sys
 import os
@@ -1036,9 +1035,354 @@ print("[DONE]")
 
 
 
+# ============================================================
+# WeAreDev Bytecode Disassembler (v5.5 NEW)
+# ============================================================
+
+class WeAreDevDisassembler:
+    """v5.5: Disassemble WeAreDev VM bytecode into human-readable opcode listing.
+    
+    Parses the binary search tree dispatch, extracts opcode handlers,
+    classifies operations, and shows decoded strings involved."""
+
+    @staticmethod
+    def disassemble(code: str, verbose: bool = False) -> str:
+        code = re.sub(r'^--\[\[.*?\]\]\s*', '', code)
+        lines = []
+        
+        # Extract P-table
+        ptable_result = WeAreDevDisassembler._extract_ptable_fast(code)
+        if ptable_result is None:
+            return "-- Failed to extract P-table structure"
+        P_decoded, accessor_name, m_offset = ptable_result
+        string_map = WeAreDevDeobfuscator._build_string_map(
+            code, P_decoded, m_offset, accessor_name)
+        
+        # Find VM function
+        vm_result = WeAreDevDisassembler._find_vm_function(code)
+        if vm_result is None:
+            return "-- Could not locate VM interpreter function"
+        vm_start, vm_end = vm_result
+        vm_body = code[vm_start:vm_end]
+        
+        # Pre-process
+        simplified = WeAreDevDisassembler._simplify_vm(vm_body, accessor_name, string_map)
+        
+        # Parse opcodes from binary search tree
+        opcodes = WeAreDevDisassembler._parse_binary_tree(simplified)
+        
+        # Build output
+        lines.append(f"-- WeAreDev VM Disassembly (v5.5)")
+        lines.append(f"-- P-table: {len(P_decoded)} entries, {m_offset} offset")
+        lines.append(f"-- Accessor: {accessor_name}()")
+        lines.append(f"-- VM function: {len(vm_body)} chars")
+        lines.append(f"-- Detected opcodes: {len(opcodes)}")
+        lines.append(f"-- Binary search depth: {WeAreDevDisassembler._tree_depth(simplified)}")
+        lines.append("")
+        
+        # Classify opcodes
+        push_ops = [op for op in opcodes if op['type'] == 'push_string']
+        char_ops = [op for op in opcodes if op['type'] == 'push_char']
+        arith_ops = [op for op in opcodes if op['type'] == 'arithmetic']
+        ctrl_ops = [op for op in opcodes if op['type'] == 'control_flow']
+        string_ops = [op for op in opcodes if op['type'] == 'string_op']
+        table_ops = [op for op in opcodes if op['type'] == 'table_op']
+        
+        lines.append(f"-- Opcode breakdown:")
+        lines.append(f"--   push_string: {len(push_ops)}")
+        lines.append(f"--   push_char:   {len(char_ops)}")
+        lines.append(f"--   arithmetic:   {len(arith_ops)}")
+        lines.append(f"--   control_flow:{len(ctrl_ops)}")
+        lines.append(f"--   string_op:   {len(string_ops)}")
+        lines.append(f"--   table_op:    {len(table_ops)}")
+        lines.append("")
+        
+        # List opcodes
+        lines.append("-- === OPCODE LIST ===")
+        for i, op in enumerate(opcodes):
+            lo, hi = op['range']
+            lines.append(f"-- [{i:3d}] IP [{lo:>12}, {hi:>12})")
+            lines.append(f"--       Type: {op['type']}")
+            if op['next_ip'] is not None:
+                lines.append(f"--       Next IP: {op['next_ip']}")
+            for detail in op['details'][:3]:
+                lines.append(f"--       {detail}")
+            lines.append("")
+        
+        # Decoded string constants
+        meaningful = {k: v for k, v in P_decoded.items()
+                     if v and len(v.strip()) > 0
+                     and not re.match(r'^[A-Za-z0-9+/=]{6,}$', v)}
+        if meaningful:
+            lines.append("-- === DECODED STRING CONSTANTS ===")
+            for idx in sorted(meaningful.keys()):
+                s = meaningful[idx]
+                if len(s) < 100 and all(32 <= ord(c) < 127 for c in s):
+                    lines.append(f'--   [{idx:3d}] = {repr(s)}')
+            lines.append("")
+        
+        return '\n'.join(lines)
+
+    @staticmethod
+    def _extract_ptable_fast(code: str):
+        """Quick P-table extraction for disassembly."""
+        p_match = re.search(r'local (\w+)=\{', code)
+        if not p_match:
+            return None
+        p_start = p_match.end()
+        depth, pos = 1, p_start
+        while pos < len(code) and depth > 0:
+            if code[pos] == '{': depth += 1
+            elif code[pos] == '}': depth -= 1
+            pos += 1
+        p_raw_text = code[p_start:pos - 1]
+        p_entries = []
+        scan = 0
+        while scan < len(p_raw_text):
+            q1 = p_raw_text.find('"', scan)
+            if q1 == -1: break
+            q2 = p_raw_text.find('"', q1 + 1)
+            if q2 == -1: break
+            raw = p_raw_text[q1 + 1:q2]
+            p_entries.append(decode_decimal_escapes(raw))
+            scan = q2 + 1
+        if not p_entries:
+            return None
+        b64_map = WeAreDevDeobfuscator._extract_b64_table(code)
+        if not b64_map:
+            return None
+        P_decoded = {}
+        for i, entry in enumerate(p_entries, 1):
+            if entry and len(entry) > 0:
+                P_decoded[i] = WeAreDevDeobfuscator._b64_decode(entry, b64_map)
+            else:
+                P_decoded[i] = ''
+        swaps = WeAreDevDeobfuscator._extract_swap_loop(code)
+        if swaps:
+            WeAreDevDeobfuscator._apply_swaps(P_decoded, swaps)
+        m_offset, acc_name = WeAreDevDeobfuscator._extract_m_offset(code)
+        return P_decoded, acc_name, m_offset
+
+    @staticmethod
+    def _find_vm_function(code: str):
+        """Find VM function using the return(W(...))(q(m))end pattern."""
+        wm = re.search(r'while\s+(\w+)\s+do\s*if\s+\1<', code)
+        if not wm:
+            return None
+        while_pos = wm.start()
+        func_start = code.rfind('function(', max(0, while_pos - 5000), while_pos)
+        if func_start == -1:
+            return None
+        # Find end: 'return q(m)end,function(' or '))end,function('
+        for pat in [r'\)\(q\(m\)\)end\)\(function\(',
+                   r'q\(m\)end,function\(',
+                   r'q\(m\)end\),function\(']:
+            m = re.search(pat, code[while_pos:])
+            if m:
+                if pat.startswith('\\)'):
+                    func_end = while_pos + m.end() - len(',function(')
+                else:
+                    func_end = while_pos + m.end() - len(',function(')
+                return func_start, func_end
+        return None
+
+    @staticmethod
+    def _simplify_vm(vm_body: str, accessor_name: str, string_map: dict) -> str:
+        """Simplify VM code for analysis."""
+        code = WeAreDevDeobfuscator._simplify_arith_in_code(vm_body)
+        # Replace accessor calls with decoded strings
+        if string_map:
+            acc = re.escape(accessor_name)
+            def replace_acc(m):
+                val = eval_arith(m.group(1))
+                if val is not None and val in string_map:
+                    s = string_map[val]
+                    if len(s) < 80 and all(32 <= ord(c) < 127 for c in s):
+                        return repr(s)
+                return m.group(0)
+            code = re.sub(acc + r'\((-?\d+(?:[+-]\(?-?\d+(?:\([^)]+\))?\)?|[+-]-?\d+)*)\)',
+                        replace_acc, code)
+        return code
+
+    @staticmethod
+    def _tree_depth(code: str) -> int:
+        """Measure the maximum nesting depth of the binary search tree."""
+        max_depth = 0
+        depth = 0
+        i = 0
+        while i < len(code):
+            for kw in ['if ', 'while ', 'for ']:
+                if code[i:i+len(kw)] == kw:
+                    before_ok = (i == 0 or not code[i-1].isalnum())
+                    if before_ok:
+                        depth += 1
+                        max_depth = max(max_depth, depth)
+            if code[i:i+3] == 'end':
+                before = code[i-1] if i > 0 else ''
+                if not before.isalnum():
+                    depth = max(0, depth - 1)
+            i += 1
+        return max_depth
+
+    @staticmethod
+    def _parse_binary_tree(simplified: str) -> list:
+        """Parse the binary search tree to extract opcode handlers."""
+        opcodes = []
+        # Extract all comparison thresholds
+        thresholds = []
+        for m in re.finditer(r'if\s+B<(\d+)', simplified):
+            thresholds.append(int(m.group(1)))
+        thresholds.sort()
+        
+        # Build ranges and find handler code for each
+        prev = 0
+        for t in thresholds:
+            # Find code between 'if B < prev' and 'if B < t'
+            range_code = WeAreDevDisassembler._extract_handler(simplified, prev, t, thresholds)
+            op_type, details, next_ip = WeAreDevDisassembler._classify_handler(range_code)
+            opcodes.append({
+                'range': (prev, t),
+                'type': op_type,
+                'details': details,
+                'next_ip': next_ip,
+            })
+            prev = t
+        # Last range
+        range_code = WeAreDevDisassembler._extract_handler(simplified, prev, None, thresholds)
+        op_type, details, next_ip = WeAreDevDisassembler._classify_handler(range_code)
+        opcodes.append({
+            'range': (prev, 'inf'),
+            'type': op_type,
+            'details': details,
+            'next_ip': next_ip,
+        })
+        return opcodes
+
+    @staticmethod
+    def _extract_handler(code: str, lo, hi, all_thresholds: list) -> str:
+        """Extract the handler code for a given IP range."""
+        # Find the 'if B < lo' pattern
+        if lo == 0:
+            # First range - look for 'if B < hi then HANDLER'
+            m = re.search(r'if B<' + str(hi) + r'then', code)
+            if m:
+                start = m.end()
+                # Find the 'else' or 'elseif' that ends this handler
+                depth = 1
+                i = start
+                while i < len(code):
+                    if code[i:i+7] == 'elseif':
+                        depth -= 1
+                        if depth == 0:
+                            return code[start:i]
+                    elif code[i:i+4] == 'else' and code[i:i+7] != 'elseif':
+                        depth -= 1
+                        if depth == 0:
+                            return code[start:i]
+                    elif code[i:i+3] == 'end':
+                        depth -= 1
+                        if depth == 0:
+                            return code[start:i]
+                    for kw in ['if ', 'while ', 'for ']:
+                        if code[i:i+len(kw)] == kw:
+                            before = code[i-1] if i > 0 else ''
+                            if not before.isalnum():
+                                depth += 1
+                            break
+                    i += 1
+                return code[start:start+200]
+        elif hi is not None:
+            # Middle range: look for 'if B < lo then ... elseif B < hi then HANDLER'
+            m = re.search(r'elseif B<' + str(hi) + r'then', code)
+            if not m:
+                m = re.search(r'else if B<' + str(hi) + r'then', code)
+            if m:
+                start = m.end()
+                # Find next 'else'/'elseif'/'end'
+                depth = 1
+                i = start
+                while i < len(code):
+                    if code[i:i+7] == 'elseif' or code[i:i+9] == 'else if B<':
+                        depth -= 1
+                        if depth == 0:
+                            return code[start:i]
+                    elif code[i:i+4] == 'else' and code[i:i+7] != 'elseif':
+                        depth -= 1
+                        if depth == 0:
+                            return code[start:i]
+                    elif code[i:i+3] == 'end':
+                        depth -= 1
+                        if depth == 0:
+                            return code[start:i]
+                    for kw in ['if ', 'while ', 'for ']:
+                        if code[i:i+len(kw)] == kw:
+                            before = code[i-1] if i > 0 else ''
+                            if not before.isalnum():
+                                depth += 1
+                            break
+                    i += 1
+                return code[start:start+200]
+        return ''
+
+    @staticmethod
+    def _classify_handler(code: str) -> tuple:
+        """Classify a handler's operation type."""
+        if not code:
+            return ('unknown', [], None)
+        
+        details = []
+        op_type = 'control_flow'
+        next_ip = None
+        
+        # Find next IP (B=NUMBER at end of handler)
+        for m in re.finditer(r'B=(-?\d+)', code):
+            val = eval_arith(m.group(1))
+            if val is not None and abs(val) > 1000:
+                next_ip = val
+        
+        # Check for table.insert / push to result
+        if 'm={' in code or 'h(m,' in code or '.append(' in code:
+            op_type = 'push_string'
+            # Extract string literals
+            for sm in re.finditer(r'"([^"\n]{2,})"', code):
+                s = sm.group(1)
+                if not re.match(r'^[A-Za-z0-9+/=]{6,}$', s):
+                    if all(32 <= ord(c) < 127 for c in s):
+                        details.append(f'string: {repr(s)[:60]}')
+        
+        # Check for chr/string.char
+        if 'chr(' in code:
+            op_type = 'push_char'
+            for m in re.finditer(r'chr\((\d+)\)', code):
+                try:
+                    c = chr(int(m.group(1)))
+                    if 32 <= ord(c) < 127:
+                        details.append(f'char: {repr(c)}')
+                except:
+                    pass
+        
+        # Check for string operations
+        if any(op in code for op in ['string.sub', 'string.len', 'string.byte']):
+            if op_type == 'control_flow':
+                op_type = 'string_op'
+        
+        # Check for arithmetic
+        arith_count = len(re.findall(r'[+\-*/%^]', code))
+        if arith_count > 5 and op_type == 'control_flow':
+            op_type = 'arithmetic'
+        
+        # Check for table operations
+        if '#' in code or 'len(' in code:
+            if op_type == 'control_flow':
+                op_type = 'table_op'
+        
+        return (op_type, details[:5], next_ip)
+
+
 class WeAreDevDeobfuscator:
-    """WeAreDev v1.0.0 decompiler - v5.4 with CFF block extraction, enhanced tracer,
-    arithmetic simplification, deep body mining, smart variable naming."""
+    """WeAreDev v1.0.0 decompiler - v5.5 with CFF block extraction, enhanced tracer,
+    arithmetic simplification, deep body mining, smart variable naming,
+    bytecode disassembler, and improved VM analysis."""
 
     M_OFFSET = 472584 - 466871
 
@@ -1146,7 +1490,7 @@ class WeAreDevDeobfuscator:
             opcode_strings=None, cff_blocks=None)
 
         meta = {
-            "method": "P-table + VM trace + CFF blocks + enhanced tracer + opcode analysis + smart naming",
+            "method": "P-table + VM trace + CFF blocks + enhanced tracer + opcode analysis + smart naming (v5.5)",
             "p_entries": len(P_decoded), "strings_decoded": len(real_strings),
             "print_count": len(prints), "trace_entries": len(trace),
             "cff_code_patterns": len(cff_code),
@@ -2429,8 +2773,8 @@ class WeAreDevDeobfuscator:
                    (opcode_strings and len(opcode_strings) > 0) or
                    (cff_blocks and len(cff_blocks) > 0))
         if has_any:
-            lines.append('-- [[ Deobfuscated by Lua Deobfuscator Bot v5.4 ]]')
-            lines.append('-- Method: P-table + VM trace + CFF blocks + enhanced tracer + opcode analysis')
+            lines.append('-- [[ Deobfuscated by Lua Deobfuscator Bot v5.5 ]]')
+            lines.append('-- Method: P-table + VM trace + CFF blocks + enhanced tracer + opcode analysis + disassembler')
             lines.append(f'-- P-table: {len(P_decoded)} entries, {len(meaningful)} meaningful strings')
             lines.append('')
         if has_recon:
@@ -2821,12 +3165,50 @@ async def l_cmd(ctx: commands.Context, link: Optional[str] = None):
         await status_msg.edit(content=f"Error: `{e}`")
 
 
+@bot.command(name="d")
+async def d_cmd(ctx: commands.Context, link: Optional[str] = None):
+    """Disassemble WeAreDev VM bytecode."""
+    try:
+        filename, code = await _fetch_source(ctx, link)
+    except ValueError as e:
+        await ctx.reply(str(e))
+        return
+
+    detected = ObfuscatorDetector.detect(code)
+    if detected != "WeAreDev":
+        await ctx.reply(f"Disassembly is only available for WeAreDev obfuscated scripts. Detected: **{detected or 'Unknown'}**")
+        return
+
+    status_msg = await ctx.reply(f"Disassembling `{filename}`...")
+    try:
+        disasm = WeAreDevDisassembler.disassemble(code, verbose=True)
+        cleaned = strip_lua_comments(disasm)
+        if len(cleaned) <= DISCORD_MSG_LIMIT:
+            await status_msg.edit(content=f"**WeAreDev VM Disassembly** (`{filename}`)\n```\n{cleaned}\n```")
+        else:
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".lua", delete=False, encoding="utf-8"
+            ) as f:
+                f.write(cleaned)
+                tmp_path = f.name
+            await status_msg.edit(content=f"**WeAreDev VM Disassembly** (`{filename}`)")
+            try:
+                await ctx.send(file=discord.File(tmp_path, filename="disassembly.lua"))
+            finally:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+    except Exception as e:
+        await status_msg.edit(content=f"Disassembly error: `{e}`")
+
+
 bot.remove_command('help')
 
 @bot.command(name="help")
 async def help_cmd(ctx: commands.Context):
     embed = discord.Embed(
-        title="Lua Deobfuscator Bot v5.4",
+        title="Lua Deobfuscator Bot v5.5",
         description="Commands:",
         color=0x5865F2,
     )
@@ -2841,8 +3223,13 @@ async def help_cmd(ctx: commands.Context):
         inline=False,
     )
     embed.add_field(
+        name=".d (disassemble)",
+        value="Attach a `.lua` or `.txt` file and run `.d` to get a bytecode disassembly of the WeAreDev VM. Shows opcodes, decoded strings, and VM structure.",
+        inline=False,
+    )
+    embed.add_field(
         name="Supported obfuscators",
-        value="WeAreDev (headerless detect), IronBrew2, WAN OBFUSCATE, MoonSec V3, Clyde, AstroProtect, LuaObfuscator.com (Ferib), PSU, Luraph, Base64+Compress, Generic VM-based.",
+        value="WeAreDev (headerless detect + bytecode disassembler), IronBrew2, WAN OBFUSCATE, MoonSec V3, Clyde, AstroProtect, LuaObfuscator.com (Ferib), PSU, Luraph, Base64+Compress, Generic VM-based.",
         inline=False,
     )
     embed.set_footer(text="Comments are stripped from the recovered source automatically.")
