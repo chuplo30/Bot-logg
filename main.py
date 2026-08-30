@@ -1129,8 +1129,20 @@ class WeAreDevDeobfuscator:
 
         source = WeAreDevDeobfuscator._generate_clean_output(
             reconstructed, trace, prints, errors, P_decoded, string_map, verbose,
-            m_offset, accessor_name, cff_code, structure_code, body_code,
-            opcode_strings=opcode_strings, cff_blocks=cff_blocks)
+            m_offset, accessor_name,
+            # v6 fix: the "bonus mining" sections (cff_code, structure_code,
+            # body_code, opcode_strings, cff_blocks) are regex-mined directly
+            # from the still-raw, not-fully-decoded VM/CFF dispatch code --
+            # they frequently pick up the obfuscator's OWN interpreter
+            # internals (base64 decode loops, jump-table chains, bit
+            # arithmetic) and dump it as if it were recovered user logic.
+            # Since strip_lua_comments() in the bot removes the "-- === X ==="
+            # section headers that would normally separate this from the
+            # reliable trace-based reconstruction, it ends up looking like
+            # unexplained junk glued onto clean output. Disabled by default;
+            # the raw values are still in `meta` below for debugging.
+            None, None, None,
+            opcode_strings=None, cff_blocks=None)
 
         meta = {
             "method": "P-table + VM trace + CFF blocks + enhanced tracer + opcode analysis + smart naming",
