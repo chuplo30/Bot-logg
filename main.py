@@ -2040,306 +2040,284 @@ class WeAreDevDeobfuscator:
     # Phase 4.5: Opcode string analysis (v5.3 NEW)
     # ============================================================
 
-    @staticmethod
-    def _mine_opcode_strings(decoded_cff: str) -> List[str]:
-        """v5.3: Extract API method names, messages, and meaningful strings
-        from the VM's opcode dispatch branches."""
-        if not decoded_cff:
-            return []
-        lines, seen = [], set()
-        def add(line):
-            if line and line not in seen:
-                seen.add(line)
-                lines.append(line)
+@staticmethod
+def _mine_opcode_strings(decoded_cff: str) -> List[str]:
+    if not decoded_cff:
+        return []
 
-        API = WeAreDevDeobfuscator.VM_API_NAMES
-        UTILITY = WeAreDevDeobfuscator.VM_UTILITY_NAMES
+    lines, seen = [], set()
 
-        # Find all meaningful string literals
-        for m in re.finditer(r'"([^"]{2,})"', decoded_cff):
-            s = m.group(1)
-            # Must be printable ASCII
-            if not all(32 <= ord(c) < 127 for c in s):
+    def add(line):
+        if line and line not in seen:
+            seen.add(line)
+            lines.append(line)
+
+    API = WeAreDevDeobfuscator.VM_API_NAMES
+    UTILITY = WeAreDevDeobfuscator.VM_UTILITY_NAMES
+
+    for m in re.finditer(r'"([^"]{2,})"', decoded_cff):
+        s = m.group(1)
+        if not all(32 <= ord(c) < 127 for c in s):
+            continue
+        if re.match(r'^[A-Za-z0-9+/=]{6,}$', s):
+            continue
+        if re.match(r'^[A-Za-z][a-z0-9]{2,}[A-Z][a-z0-9]*$', s):
+            continue
+
+        if s in API:
+            add(f'-- VM uses API: {s}')
+            continue
+
+        if s in UTILITY:
+            add(f'-- VM uses: {s}')
+            continue
+
+        if s in ('Instance', 'game', 'workspace', 'Enum', 'task', 'coroutine',
+                 'Color3', 'Vector3', 'Vector2', 'UDim2', 'UDim', 'CFrame',
+                 'TweenInfo', 'Rect', 'Font', 'NumberSequence', 'ColorSequence',
+                 'NumberRange', 'RaycastParams', 'PhysicalProperties',
+                 'Players', 'ReplicatedStorage', 'RunService', 'UserInputService',
+                 'TweenService', 'Lighting', 'StarterGui', 'HttpService',
+                 'DataStoreService', 'MarketplaceService', 'CollectionService',
+                 'PathfindingService', 'SoundService', 'TextService',
+                 'GuiService', 'CoreGui', 'VirtualUser', 'ContentProvider',
+                 'Humanoid', 'RootPart', 'Torso', 'Head', 'LeftArm', 'RightArm',
+                 'LeftLeg', 'RightLeg', 'Animation', 'Animator', 'Track',
+                 'Camera', 'CurrentCamera', 'Workspace', 'Terrain', 'Material',
+                 'Part', 'BasePart', 'Model', 'Folder', 'Tool', 'HopperBin',
+                 'ScreenGui', 'Frame', 'TextLabel', 'TextButton', 'ImageLabel',
+                 'ImageButton', 'ScrollingFrame', 'TextBox', 'TextService',
+                 'ViewportFrame', 'VideoFrame', 'WebBrowser', 'SurfaceGui',
+                 'BillboardGui', 'Selection', 'SelectionBox', 'SelectionLasso',
+                 'Dialog', 'DialogChoice', 'Message', 'Sound', 'AudioPlayer',
+                 'Video', 'Movie', 'Chat', 'VoiceChatService', 'VoiceChat',
+                 'FriendService', 'GroupService', 'BadgeService', 'PassService',
+                 'DeveloperProducts', 'SubscriptionService', 'PrivateServer',
+                 'MemoryStoreService', 'MessagingService', 'TeleportService',
+                 'ScriptContext', 'StarterPlayer', 'StarterPack', 'StarterGui',
+                 'ReplicatedFirst', 'ServerStorage', 'ServerScriptService',
+                 'CorePackages', 'CoreGui', 'CoreScripts', 'RobloxGui',
+                 'HttpRbxApiService', 'FriendService', 'GroupService',
+                 'BadgeService', 'PassService', 'DeveloperProducts',
+                 'SubscriptionService', 'PrivateServer', 'VRService',
+                 'MotionBlur', 'Bloom', 'Blur', 'ColorCorrection', 'DepthOfField',
+                 'SunRays', 'Atmosphere', 'Clouds', 'Sky', 'Lighting',
+                 'Debris', 'Spawn', 'delay', 'wait', 'task.wait', 'task.spawn',
+                 'task.delay', 'task.defer', 'task.sync', 'task.desync',
+                 'math', 'string', 'table', 'coroutine', 'debug', 'bit32', 'bit',
+                 'utf8', 'os', 'io', 'package', 'loadstring', 'loadfile',
+                 'dofile', 'print', 'warn', 'error', 'assert', 'select',
+                 'tonumber', 'tostring', 'type', 'next', 'pairs', 'ipairs',
+                 'unpack', 'rawget', 'rawset', 'getmetatable', 'setmetatable',
+                 'pcall', 'xpcall', 'getfenv', 'setfenv', 'getgenv', 'setgenv',
+                 'getrenv', 'setrenv', 'getrawmetatable', 'setrawmetatable',
+                 'iscclosure', 'isluaufunction', 'hookfunction', 'newcclosure',
+                 'syn', 'protect_gui', 'rconsoleprint', 'rconsoleinfo',
+                 'rconsolewarn', 'rconsoleclear', 'rconsoleinput',
+                 'HttpGet', 'HttpPost', 'FireServer', 'InvokeServer',
+                 'OnServerEvent', 'OnClientEvent', 'BindToRenderStep',
+                 'UnbindFromRenderStep', 'GetPropertyChangedSignal',
+                 'GetChildren', 'GetDescendants', 'GetAttribute', 'SetAttribute',
+                 'AddTag', 'HasTag', 'GetTags', 'ClearAllChildren',
+                 'GetBoundingBox', 'GetPivot', 'SetPivot', 'AlignPosition',
+                 'TweenPosition', 'TweenSize', 'TweenRotation', 'TweenColor',
+                 'GetState', 'SetState', 'GetNetworkOwner', 'SetNetworkOwner',
+                 'GetPlayerFromCharacter', 'GetCharacterFromPlayer',
+                 'GetMouseLocation', 'GetCamera', 'SetCamera',
+                 'GetPartBounds', 'GetPartsInPart', 'GetPartsInBox',
+                 'GetPartsInSphere', 'FireAllClients', 'FireClient',
+                 'FireAllServers', 'Raycast', 'WaitForChild'):
+            add(f'-- VM references: {s}')
+            continue
+
+        if len(s) >= 4 and len(s) <= 120:
+            if re.match(r'^[A-Z][a-zA-Z0-9]*$', s) and s[0].isupper():
+                if s not in ('true', 'false', 'nil', 'then', 'else', 'end', 'do',
+                             'local', 'function', 'return', 'if', 'while', 'for',
+                             'in', 'not', 'and', 'or', 'repeat', 'until', 'break'):
+                    CLASS_NAMES = {
+                        'ScreenGui', 'Frame', 'TextLabel', 'TextButton', 'ImageLabel', 'ImageButton',
+                        'ScrollingFrame', 'ViewportFrame', 'CanvasGroup', 'BillboardGui', 'SurfaceGui',
+                        'UICorner', 'UIPadding', 'UIStroke', 'UIListLayout', 'UIGridLayout',
+                        'UITableLayout', 'UIPageLayout', 'UIZIndex', 'UIConstraint', 'UIAspectRatioConstraint',
+                        'UIEdgeInsets', 'UITextBox', 'UITextInput', 'UIAction', 'Folder',
+                        'RemoteEvent', 'RemoteFunction', 'BindableEvent', 'BindableFunction',
+                        'ObjectValue', 'StringValue', 'BoolValue', 'IntValue', 'NumberValue',
+                        'Vector3Value', 'CFrameValue', 'Color3Value', 'Udim2Value', 'BrickColorValue',
+                        'Part', 'Model', 'Workspace', 'Camera', 'Terrain', 'BasePart', 'WedgePart',
+                        'CylinderPart', 'SpherePart', 'CornerWedgePart', 'TrussPart', 'Seat',
+                        'VehicleSeat', 'SpawnLocation', 'Spawner', 'ForceField', 'Smoke', 'Fire',
+                        'Sparkles', 'PointLight', 'SpotLight', 'SurfaceLight', 'ParticleEmitter',
+                        'Trail', 'Beam', 'Attachment', 'AlignPosition', 'AlignOrientation',
+                        'Humanoid', 'Animator', 'AnimationTrack', 'Animation', 'KeyframeSequence',
+                        'LocalScript', 'Script', 'ModuleScript', 'Plugin', 'PluginToolbar',
+                        'Tool', 'HopperBin', 'Dialog', 'DialogChoice', 'Message', 'Sound',
+                        'Video', 'Movie', 'WebBrowser', 'Selection', 'SelectionBox',
+                        'SelectionLasso', 'Clouds', 'Atmosphere', 'Sky', 'Bloom', 'Blur',
+                        'ColorCorrection', 'DepthOfField', 'MotionBlur', 'SunRays',
+                        'ScreenEffect', 'PostEffect', 'CameraEffect', 'ImageHandle',
+                        'StarterGui', 'CoreGui', 'RobloxGui', 'PluginGui', 'CorePackages',
+                        'Players', 'ReplicatedStorage', 'RunService', 'UserInputService',
+                        'TweenService', 'Lighting', 'StarterGui', 'HttpService',
+                        'DataStoreService', 'MarketplaceService', 'CollectionService',
+                        'PathfindingService', 'SoundService', 'TextService',
+                        'GuiService', 'CoreGui', 'VirtualUser', 'ContentProvider',
+                        'ContextActionService', 'PhysicsService', 'Debris', 'LogService',
+                        'TeleportService', 'FriendService', 'GroupService', 'BadgeService',
+                        'PassService', 'DeveloperProducts', 'SubscriptionService', 'PrivateServer',
+                        'MemoryStoreService', 'MessagingService', 'VRService', 'ChatService',
+                        'VoiceChatService', 'RobloxReplicatedStorage', 'ServerStorage',
+                        'ServerScriptService', 'ReplicatedFirst', 'StarterPack', 'StarterPlayer',
+                        'ScriptContext', 'CoreScripts',
+                    }
+                    PROPERTY_KEYWORDS = {
+                        'Color', 'Size', 'Position', 'Text', 'Font', 'Visible', 'Enabled', 'Name',
+                        'Parent', 'Value', 'Transparency', 'Anchor', 'Border', 'Layout', 'ZIndex',
+                        'Background', 'Offset', 'Scale', 'Rotation', 'Angle', 'Direction', 'Velocity',
+                        'Acceleration', 'MaxForce', 'Damping', 'Friction', 'Elasticity', 'Density',
+                        'Shape', 'Texture', 'Image', 'ImageColor', 'ImageRect', 'ImageSize',
+                        'TextColor', 'TextSize', 'TextX', 'TextY', 'TextWrap', 'TextScaled',
+                        'FontSize', 'FontStyle', 'FontWeight', 'FontName', 'FontFamily',
+                        'Cursor', 'Draggable', 'Active', 'Selected', 'Hovered', 'Pressed',
+                        'Click', 'Mouse', 'Key', 'Input', 'Keyboard', 'Gamepad', 'Touch',
+                        'Gesture', 'Swipe', 'Pinch', 'Rotate', 'Fling', 'Pan', 'Zoom',
+                        'Magnification', 'FieldOfView', 'CameraType', 'Focus', 'Subject',
+                        'Health', 'MaxHealth', 'WalkSpeed', 'JumpPower', 'Gravity',
+                        'Sit', 'Swim', 'Climb', 'Fall', 'Death', 'Respawn', 'Team',
+                        'Score', 'Time', 'Date', 'Duration', 'Count', 'Index', 'Key',
+                        'Data', 'Save', 'Load', 'Reset', 'Clear', 'Delete', 'Update',
+                        'Get', 'Set', 'Add', 'Remove', 'Find', 'Search', 'Filter',
+                        'Sort', 'Order', 'Random', 'Shuffle', 'Reverse', 'Copy', 'Paste',
+                        'Cut', 'Move', 'Scale', 'Rotate', 'Colorize', 'Animate', 'Tween',
+                        'Easing', 'Style', 'Loop', 'Ping', 'Pong', 'Latency', 'Sync',
+                        'Archivable', 'CanCollide', 'CanQuery', 'CanTouch', 'CastShadow',
+                        'CFrame', 'Elasticity', 'Friction', 'Locked', 'Mass', 'Material',
+                        'Orientation', 'PivotOffset', 'PivotPosition', 'Rotation',
+                        'RootPart', 'PrimaryPart', 'HumanoidRootPart',
+                        'WalkSpeed', 'JumpPower', 'JumpHeight', 'Gravity',
+                        'Health', 'MaxHealth', 'HumanoidState', 'Sit', 'PlatformStand',
+                        'AutoJump', 'AutoRotate', 'Torso', 'Head', 'LeftArm', 'RightArm',
+                        'LeftLeg', 'RightLeg', 'HipHeight', 'HipWidth', 'Neck',
+                        'AnimatePhysics', 'BreakJointsOnDeath', 'DisplayName',
+                        'AccountAge', 'MembershipType', 'Verified', 'IsOnline',
+                        'GameId', 'PlaceId', 'JobId', 'DataStoreId', 'InventoryId',
+                        'UserId', 'FriendId', 'GroupId', 'BadgeId', 'PassId',
+                        'DeveloperProductId', 'SubscriptionId', 'PrivateServerId',
+                        'AssetId', 'AssetType', 'Version', 'Created', 'Updated',
+                        'Access', 'Permission', 'Owner', 'Creator', 'Author',
+                        'Rating', 'Votes', 'Favorites', 'Downloads', 'Installs',
+                        'Plays', 'Visits', 'Likes', 'Dislikes', 'Comments',
+                        'Reports', 'Abuse', 'Moderation', 'Terms', 'Policy',
+                        'Privacy', 'Public', 'Private', 'Unlisted', 'Featured',
+                        'Trending', 'Popular', 'New', 'Hot', 'Top', 'Best',
+                        'Sponsored', 'Advertised', 'Promoted',
+                    }
+                    EVENT_NAMES = {
+                        'Click', 'MouseButton1Click', 'MouseButton2Click', 'MouseEnter', 'MouseLeave',
+                        'MouseMoved', 'KeyDown', 'KeyUp', 'InputBegan', 'InputEnded', 'InputChanged',
+                        'TouchBegan', 'TouchEnded', 'TouchMoved', 'GestureBegan', 'GestureEnded',
+                        'GestureChanged', 'Swipe', 'Pinch', 'Rotate', 'Pan', 'Zoom',
+                        'OnServerEvent', 'OnClientEvent', 'RemoteEvent', 'RemoteFunction',
+                        'FireServer', 'InvokeServer', 'FireClient', 'FireAllClients',
+                        'Heartbeat', 'Stepped', 'RenderStepped', 'PreRender', 'PostRender',
+                        'BindToRenderStep', 'UnbindFromRenderStep',
+                        'GetPropertyChangedSignal', 'Changed', 'ChildAdded', 'ChildRemoved',
+                        'DescendantAdded', 'DescendantRemoved', 'AncestryChanged',
+                        'Began', 'Ended', 'Updated', 'Cleared', 'Loaded', 'Unloaded',
+                        'Ready', 'Complete', 'Canceled', 'Paused', 'Resumed', 'Stopped',
+                        'Finished', 'Failed', 'Success', 'Error', 'Timeout', 'Retry',
+                        'Cancel', 'Play', 'Pause', 'Stop', 'Resume', 'Seek', 'Skip',
+                        'Loop', 'Shuffle', 'Reverse', 'Forward', 'Backward',
+                        'Up', 'Down', 'Left', 'Right', 'Jump', 'Run', 'Walk',
+                        'Sit', 'Stand', 'Crouch', 'Prone', 'Swim', 'Climb',
+                        'Fall', 'Die', 'Respawn', 'Spawn', 'Join', 'Leave',
+                        'Connect', 'Disconnect', 'Reconnect', 'Authenticate',
+                    }
+                    if s in CLASS_NAMES:
+                        add(f'-- VM creates/references class: {s}')
+                    elif any(x in s for x in PROPERTY_KEYWORDS):
+                        add(f'-- VM sets property: {s}')
+                    elif any(x in s for x in EVENT_NAMES):
+                        add(f'-- VM handles event: {s}')
+                    elif '.' in s and s.split('.')[0] in ('Font', 'Enum', 'TweenInfo', 'EnumItem', 'BrickColor'):
+                        add(f'-- VM uses Enum/constant: {s}')
+                    else:
+                        add(f'-- VM identifier: {s}')
                 continue
-            # Skip base64-looking strings and random alphanumeric
-            if re.match(r'^[A-Za-z0-9+/=]{6,}$', s):
+
+            if re.match(r'^[a-z][a-zA-Z0-9_]*$', s) and s[0].islower():
+                API_CALLS = {
+                    'print', 'warn', 'error', 'assert', 'pcall', 'xpcall', 'loadstring',
+                    'getfenv', 'setfenv', 'getgenv', 'setgenv', 'getrenv', 'setrenv',
+                    'rawget', 'rawset', 'getmetatable', 'setmetatable', 'iscclosure',
+                    'isluaufunction', 'hookfunction', 'newcclosure', 'syn', 'protect_gui',
+                    'rconsoleprint', 'rconsoleinfo', 'rconsolewarn', 'rconsoleclear',
+                    'HttpGet', 'HttpPost', 'FireServer', 'InvokeServer', 'Wait', 'Spawn',
+                    'delay', 'task.wait', 'task.spawn', 'task.delay', 'task.defer',
+                }
+                TIMER_NAMES = {'wait', 'spawn', 'delay', 'sleep', 'time', 'clock', 'date', 'os'}
+                if s in API_CALLS:
+                    add(f'-- VM calls API: {s}')
+                elif s in TIMER_NAMES:
+                    add(f'-- VM uses timer: {s}')
+                elif re.match(r'^[a-z]+[A-Z][a-z]', s):
+                    add(f'-- VM defines function: {s}')
+                else:
+                    add(f'-- VM local variable: {s}')
                 continue
-            if re.match(r'^[A-Za-z][a-z0-9]{2,}[A-Z][a-z0-9]*$', s):
-                continue
 
-            # API method names
-            if s in API:
-                add(f'-- VM uses API: {s}')
-                continue
+            if re.match(r'^[A-Za-z0-9+/=]+$', s) and len(s) >= 16:
+                try:
+                    import base64
+                    decoded = base64.b64decode(s + '=' * (4 - len(s) % 4))
+                    if decoded:
+                        add(f'-- VM Base64 string (decoded): "{decoded.decode("utf-8", errors="ignore")}"')
+                except:
+                    pass
+            elif re.match(r'^[0-9A-Fa-f]+$', s) and len(s) >= 8:
+                try:
+                    decoded = bytes.fromhex(s).decode('utf-8', errors='ignore')
+                    if decoded:
+                        add(f'-- VM hex string: "{decoded}"')
+                except:
+                    pass
+            elif re.match(r'^[A-Za-z0-9!#$%&()*+,-.:;<=>?@^_`{|}~]+$', s) and len(s) >= 12:
+                add(f'-- VM encoded string (Base85?): "{s[:30]}..."')
+            elif s.startswith('Error:') or s.startswith('ERROR:') or s.startswith('Warning:'):
+                add(f'-- VM error/warning message: "{s}"')
+            elif len(s) <= 40 and any(x in s for x in ['Loading', 'Ready', 'Done', 'Complete', 'Success', 'Failed']):
+                add(f'-- VM status message: "{s}"')
+            elif len(s) > 40 and not re.match(r'^[A-Za-z0-9]+$', s):
+                add(f'-- VM string literal: "{s}"')
 
-            # Utility names
-            if s in UTILITY:
-                add(f'-- VM uses: {s}')
-                continue
-
-            # Roblox API names not in our set
-if s in ('Instance', 'game', 'workspace', 'Enum', 'task', 'coroutine',
-         'Color3', 'Vector3', 'Vector2', 'UDim2', 'UDim', 'CFrame',
-         'TweenInfo', 'Rect', 'Font', 'NumberSequence', 'ColorSequence',
-         'NumberRange', 'RaycastParams', 'PhysicalProperties',
-         'Players', 'ReplicatedStorage', 'RunService', 'UserInputService',
-         'TweenService', 'Lighting', 'StarterGui', 'HttpService',
-         'DataStoreService', 'MarketplaceService', 'CollectionService',
-         'PathfindingService', 'SoundService', 'TextService',
-         'GuiService', 'CoreGui', 'VirtualUser', 'ContentProvider',
-         # === THÊM MỚI ===
-         'Humanoid', 'RootPart', 'Torso', 'Head', 'LeftArm', 'RightArm',
-         'LeftLeg', 'RightLeg', 'Animation', 'Animator', 'Track',
-         'Camera', 'CurrentCamera', 'Workspace', 'Terrain', 'Material',
-         'Part', 'BasePart', 'Model', 'Folder', 'Tool', 'HopperBin',
-         'ScreenGui', 'Frame', 'TextLabel', 'TextButton', 'ImageLabel',
-         'ImageButton', 'ScrollingFrame', 'TextBox', 'TextService',
-         'ViewportFrame', 'VideoFrame', 'WebBrowser', 'SurfaceGui',
-         'BillboardGui', 'Selection', 'SelectionBox', 'SelectionLasso',
-         'Dialog', 'DialogChoice', 'Message', 'Sound', 'AudioPlayer',
-         'Video', 'Movie', 'Chat', 'VoiceChatService', 'VoiceChat',
-         'FriendService', 'GroupService', 'BadgeService', 'PassService',
-         'DeveloperProducts', 'SubscriptionService', 'PrivateServer',
-         'MemoryStoreService', 'MessagingService', 'TeleportService',
-         'ScriptContext', 'StarterPlayer', 'StarterPack', 'StarterGui',
-         'ReplicatedFirst', 'ServerStorage', 'ServerScriptService',
-         'CorePackages', 'CoreGui', 'CoreScripts', 'RobloxGui',
-         'HttpRbxApiService', 'FriendService', 'GroupService',
-         'BadgeService', 'PassService', 'DeveloperProducts',
-         'SubscriptionService', 'PrivateServer', 'VRService',
-         'MotionBlur', 'Bloom', 'Blur', 'ColorCorrection', 'DepthOfField',
-         'SunRays', 'Atmosphere', 'Clouds', 'Sky', 'Lighting',
-         'Debris', 'Spawn', 'delay', 'wait', 'task.wait', 'task.spawn',
-         'task.delay', 'task.defer', 'task.sync', 'task.desync',
-         'math', 'string', 'table', 'coroutine', 'debug', 'bit32', 'bit',
-         'utf8', 'os', 'io', 'package', 'loadstring', 'loadfile',
-         'dofile', 'print', 'warn', 'error', 'assert', 'select',
-         'tonumber', 'tostring', 'type', 'next', 'pairs', 'ipairs',
-         'unpack', 'rawget', 'rawset', 'getmetatable', 'setmetatable',
-         'pcall', 'xpcall', 'getfenv', 'setfenv', 'getgenv', 'setgenv',
-         'getrenv', 'setrenv', 'getrawmetatable', 'setrawmetatable',
-         'iscclosure', 'isluaufunction', 'hookfunction', 'newcclosure',
-         'syn', 'protect_gui', 'rconsoleprint', 'rconsoleinfo',
-         'rconsolewarn', 'rconsoleclear', 'rconsoleinput',
-         'HttpGet', 'HttpPost', 'FireServer', 'InvokeServer',
-         'OnServerEvent', 'OnClientEvent', 'BindToRenderStep',
-         'UnbindFromRenderStep', 'GetPropertyChangedSignal',
-         'GetChildren', 'GetDescendants', 'GetAttribute', 'SetAttribute',
-         'AddTag', 'HasTag', 'GetTags', 'ClearAllChildren',
-         'GetBoundingBox', 'GetPivot', 'SetPivot', 'AlignPosition',
-         'TweenPosition', 'TweenSize', 'TweenRotation', 'TweenColor',
-         'GetState', 'SetState', 'GetNetworkOwner', 'SetNetworkOwner',
-         'GetPlayerFromCharacter', 'GetCharacterFromPlayer',
-         'GetMouseLocation', 'GetCamera', 'SetCamera',
-         'GetPartBounds', 'GetPartsInPart', 'GetPartsInBox',
-         'GetPartsInSphere', 'FireAllClients', 'FireClient',
-         'FireAllServers', 'Raycast', 'WaitForChild'):
-    add(f'-- VM references: {s}')
-    continue
-
-# String constants that look like messages, property values, identifiers
-if len(s) >= 4 and len(s) <= 120:
-    # --- 1. XỬ LÝ CHUỖI VIẾT HOA (Class, Property, Event, Enum) ---
-    if re.match(r'^[A-Z][a-zA-Z0-9]*$', s) and s[0].isupper():
-        if s not in ('true', 'false', 'nil', 'then', 'else', 'end', 'do',
-                     'local', 'function', 'return', 'if', 'while', 'for',
-                     'in', 'not', 'and', 'or', 'repeat', 'until', 'break'):
-            # Mở rộng danh sách class names
-            CLASS_NAMES = {
-                'ScreenGui', 'Frame', 'TextLabel', 'TextButton', 'ImageLabel', 'ImageButton',
-                'ScrollingFrame', 'ViewportFrame', 'CanvasGroup', 'BillboardGui', 'SurfaceGui',
-                'UICorner', 'UIPadding', 'UIStroke', 'UIListLayout', 'UIGridLayout',
-                'UITableLayout', 'UIPageLayout', 'UIZIndex', 'UIConstraint', 'UIAspectRatioConstraint',
-                'UIEdgeInsets', 'UITextBox', 'UITextInput', 'UIAction', 'Folder',
-                'RemoteEvent', 'RemoteFunction', 'BindableEvent', 'BindableFunction',
-                'ObjectValue', 'StringValue', 'BoolValue', 'IntValue', 'NumberValue',
-                'Vector3Value', 'CFrameValue', 'Color3Value', 'Udim2Value', 'BrickColorValue',
-                'Part', 'Model', 'Workspace', 'Camera', 'Terrain', 'BasePart', 'WedgePart',
-                'CylinderPart', 'SpherePart', 'CornerWedgePart', 'TrussPart', 'Seat',
-                'VehicleSeat', 'SpawnLocation', 'Spawner', 'ForceField', 'Smoke', 'Fire',
-                'Sparkles', 'PointLight', 'SpotLight', 'SurfaceLight', 'ParticleEmitter',
-                'Trail', 'Beam', 'Attachment', 'AlignPosition', 'AlignOrientation',
-                'Humanoid', 'Animator', 'AnimationTrack', 'Animation', 'KeyframeSequence',
-                'LocalScript', 'Script', 'ModuleScript', 'Plugin', 'PluginToolbar',
-                'Tool', 'HopperBin', 'Dialog', 'DialogChoice', 'Message', 'Sound',
-                'Video', 'Movie', 'WebBrowser', 'Selection', 'SelectionBox',
-                'SelectionLasso', 'Clouds', 'Atmosphere', 'Sky', 'Bloom', 'Blur',
-                'ColorCorrection', 'DepthOfField', 'MotionBlur', 'SunRays',
-                'ScreenEffect', 'PostEffect', 'CameraEffect', 'ImageHandle',
-                'StarterGui', 'CoreGui', 'RobloxGui', 'PluginGui', 'CorePackages',
-                'Players', 'ReplicatedStorage', 'RunService', 'UserInputService',
-                'TweenService', 'Lighting', 'StarterGui', 'HttpService',
-                'DataStoreService', 'MarketplaceService', 'CollectionService',
-                'PathfindingService', 'SoundService', 'TextService',
-                'GuiService', 'CoreGui', 'VirtualUser', 'ContentProvider',
-                'ContextActionService', 'PhysicsService', 'Debris', 'LogService',
-                'TeleportService', 'FriendService', 'GroupService', 'BadgeService',
-                'PassService', 'DeveloperProducts', 'SubscriptionService', 'PrivateServer',
-                'MemoryStoreService', 'MessagingService', 'VRService', 'ChatService',
-                'VoiceChatService', 'RobloxReplicatedStorage', 'ServerStorage',
-                'ServerScriptService', 'ReplicatedFirst', 'StarterPack', 'StarterPlayer',
-                'ScriptContext', 'CoreScripts',
-            }
-            PROPERTY_KEYWORDS = {
-                'Color', 'Size', 'Position', 'Text', 'Font', 'Visible', 'Enabled', 'Name',
-                'Parent', 'Value', 'Transparency', 'Anchor', 'Border', 'Layout', 'ZIndex',
-                'Background', 'Offset', 'Scale', 'Rotation', 'Angle', 'Direction', 'Velocity',
-                'Acceleration', 'MaxForce', 'Damping', 'Friction', 'Elasticity', 'Density',
-                'Shape', 'Texture', 'Image', 'ImageColor', 'ImageRect', 'ImageSize',
-                'TextColor', 'TextSize', 'TextX', 'TextY', 'TextWrap', 'TextScaled',
-                'FontSize', 'FontStyle', 'FontWeight', 'FontName', 'FontFamily',
-                'Cursor', 'Draggable', 'Active', 'Selected', 'Hovered', 'Pressed',
-                'Click', 'Mouse', 'Key', 'Input', 'Keyboard', 'Gamepad', 'Touch',
-                'Gesture', 'Swipe', 'Pinch', 'Rotate', 'Fling', 'Pan', 'Zoom',
-                'Magnification', 'FieldOfView', 'CameraType', 'Focus', 'Subject',
-                'Health', 'MaxHealth', 'WalkSpeed', 'JumpPower', 'Gravity',
-                'Sit', 'Swim', 'Climb', 'Fall', 'Death', 'Respawn', 'Team',
-                'Score', 'Time', 'Date', 'Duration', 'Count', 'Index', 'Key',
-                'Data', 'Save', 'Load', 'Reset', 'Clear', 'Delete', 'Update',
-                'Get', 'Set', 'Add', 'Remove', 'Find', 'Search', 'Filter',
-                'Sort', 'Order', 'Random', 'Shuffle', 'Reverse', 'Copy', 'Paste',
-                'Cut', 'Move', 'Scale', 'Rotate', 'Colorize', 'Animate', 'Tween',
-                'Easing', 'Style', 'Loop', 'Ping', 'Pong', 'Latency', 'Sync',
-                'Archivable', 'CanCollide', 'CanQuery', 'CanTouch', 'CastShadow',
-                'CFrame', 'Elasticity', 'Friction', 'Locked', 'Mass', 'Material',
-                'Orientation', 'PivotOffset', 'PivotPosition', 'Rotation',
-                'RootPart', 'PrimaryPart', 'HumanoidRootPart',
-                'WalkSpeed', 'JumpPower', 'JumpHeight', 'Gravity',
-                'Health', 'MaxHealth', 'HumanoidState', 'Sit', 'PlatformStand',
-                'AutoJump', 'AutoRotate', 'Torso', 'Head', 'LeftArm', 'RightArm',
-                'LeftLeg', 'RightLeg', 'HipHeight', 'HipWidth', 'Neck',
-                'AnimatePhysics', 'BreakJointsOnDeath', 'DisplayName',
-                'AccountAge', 'MembershipType', 'Verified', 'IsOnline',
-                'GameId', 'PlaceId', 'JobId', 'DataStoreId', 'InventoryId',
-                'UserId', 'FriendId', 'GroupId', 'BadgeId', 'PassId',
-                'DeveloperProductId', 'SubscriptionId', 'PrivateServerId',
-                'AssetId', 'AssetType', 'Version', 'Created', 'Updated',
-                'Access', 'Permission', 'Owner', 'Creator', 'Author',
-                'Rating', 'Votes', 'Favorites', 'Downloads', 'Installs',
-                'Plays', 'Visits', 'Likes', 'Dislikes', 'Comments',
-                'Reports', 'Abuse', 'Moderation', 'Terms', 'Policy',
-                'Privacy', 'Public', 'Private', 'Unlisted', 'Featured',
-                'Trending', 'Popular', 'New', 'Hot', 'Top', 'Best',
-                'Sponsored', 'Advertised', 'Promoted',
-            }
-            EVENT_NAMES = {
-                'Click', 'MouseButton1Click', 'MouseButton2Click', 'MouseEnter', 'MouseLeave',
-                'MouseMoved', 'KeyDown', 'KeyUp', 'InputBegan', 'InputEnded', 'InputChanged',
-                'TouchBegan', 'TouchEnded', 'TouchMoved', 'GestureBegan', 'GestureEnded',
-                'GestureChanged', 'Swipe', 'Pinch', 'Rotate', 'Pan', 'Zoom',
-                'OnServerEvent', 'OnClientEvent', 'RemoteEvent', 'RemoteFunction',
-                'FireServer', 'InvokeServer', 'FireClient', 'FireAllClients',
-                'Heartbeat', 'Stepped', 'RenderStepped', 'PreRender', 'PostRender',
-                'BindToRenderStep', 'UnbindFromRenderStep',
-                'GetPropertyChangedSignal', 'Changed', 'ChildAdded', 'ChildRemoved',
-                'DescendantAdded', 'DescendantRemoved', 'AncestryChanged',
-                'Began', 'Ended', 'Updated', 'Cleared', 'Loaded', 'Unloaded',
-                'Ready', 'Complete', 'Canceled', 'Paused', 'Resumed', 'Stopped',
-                'Finished', 'Failed', 'Success', 'Error', 'Timeout', 'Retry',
-                'Cancel', 'Play', 'Pause', 'Stop', 'Resume', 'Seek', 'Skip',
-                'Loop', 'Shuffle', 'Reverse', 'Forward', 'Backward',
-                'Up', 'Down', 'Left', 'Right', 'Jump', 'Run', 'Walk',
-                'Sit', 'Stand', 'Crouch', 'Prone', 'Swim', 'Climb',
-                'Fall', 'Die', 'Respawn', 'Spawn', 'Join', 'Leave',
-                'Connect', 'Disconnect', 'Reconnect', 'Authenticate',
-            }
-            if s in CLASS_NAMES:
-                add(f'-- VM creates/references class: {s}')
-            elif any(x in s for x in PROPERTY_KEYWORDS):
-                add(f'-- VM sets property: {s}')
-            elif any(x in s for x in EVENT_NAMES):
-                add(f'-- VM handles event: {s}')
-            elif '.' in s and s.split('.')[0] in ('Font', 'Enum', 'TweenInfo', 'EnumItem', 'BrickColor'):
-                add(f'-- VM uses Enum/constant: {s}')
-            else:
-                add(f'-- VM identifier: {s}')
-        continue
-
-    # --- 2. XỬ LÝ CHUỖI VIẾT THƯỜNG (API, biến, hàm) ---
-    if re.match(r'^[a-z][a-zA-Z0-9_]*$', s) and s[0].islower():
-        API_CALLS = {
-            'print', 'warn', 'error', 'assert', 'pcall', 'xpcall', 'loadstring',
-            'getfenv', 'setfenv', 'getgenv', 'setgenv', 'getrenv', 'setrenv',
-            'rawget', 'rawset', 'getmetatable', 'setmetatable', 'iscclosure',
-            'isluaufunction', 'hookfunction', 'newcclosure', 'syn', 'protect_gui',
-            'rconsoleprint', 'rconsoleinfo', 'rconsolewarn', 'rconsoleclear',
-            'HttpGet', 'HttpPost', 'FireServer', 'InvokeServer', 'Wait', 'Spawn',
-            'delay', 'task.wait', 'task.spawn', 'task.delay', 'task.defer',
-        }
-        TIMER_NAMES = {'wait', 'spawn', 'delay', 'sleep', 'time', 'clock', 'date', 'os'}
-        if s in API_CALLS:
-            add(f'-- VM calls API: {s}')
-        elif s in TIMER_NAMES:
-            add(f'-- VM uses timer: {s}')
-        elif re.match(r'^[a-z]+[A-Z][a-z]', s):
-            add(f'-- VM defines function: {s}')
-        else:
-            add(f'-- VM local variable: {s}')
-        continue
-
-    # --- 3. PHÁT HIỆN CHUỖI OBFUSCATED (Base64, Hex, Base85) ---
-    if re.match(r'^[A-Za-z0-9+/=]+$', s) and len(s) >= 16:
-        try:
-            import base64
-            decoded = base64.b64decode(s + '=' * (4 - len(s) % 4))
-            if decoded:
-                add(f'-- VM Base64 string (decoded): "{decoded.decode("utf-8", errors="ignore")}"')
-        except:
-            pass
-    elif re.match(r'^[0-9A-Fa-f]+$', s) and len(s) >= 8:
-        try:
-            decoded = bytes.fromhex(s).decode('utf-8', errors='ignore')
-            if decoded:
-                add(f'-- VM hex string: "{decoded}"')
-        except:
-            pass
-    elif re.match(r'^[A-Za-z0-9!#$%&()*+,-.:;<=>?@^_`{|}~]+$', s) and len(s) >= 12:
-        add(f'-- VM encoded string (Base85?): "{s[:30]}..."')
-
-    # --- 4. PHÁT HIỆN THÔNG BÁO LỖI / TRẠNG THÁI ---
-    elif s.startswith('Error:') or s.startswith('ERROR:') or s.startswith('Warning:'):
-        add(f'-- VM error/warning message: "{s}"')
-    elif len(s) <= 40 and any(x in s for x in ['Loading', 'Ready', 'Done', 'Complete', 'Success', 'Failed']):
-        add(f'-- VM status message: "{s}"')
-    elif len(s) > 40 and not re.match(r'^[A-Za-z0-9]+$', s):
-        add(f'-- VM string literal: "{s}"')
-
-                # Messages / display text (contains spaces or special chars)
             if any(c in s for c in [' ', '!', '?', '.', ':', '/', '\\', '%']) and not s.startswith('end'):
-                    # Skip code-like strings (VM internal operations)
-                    if re.match(r'^[a-z]=', s) or re.match(r'^[a-z][A-Z]', s):
-                        continue
+                if re.match(r'^[a-z]=', s) or re.match(r'^[a-z][A-Z]', s):
+                    continue
+                if '=' in s and any(kw in s for kw in ['q[o]', 'q[S]', 'p[r[', 'q=p[r',
+                                                      'q<', 'q and', 'q or', 'q=U',
+                                                      'end else', 'end end', 'end if']):
+                    continue
+                vm_var_count = sum(1 for c in s if c == '=')
+                short_assign = len(re.findall(r'[a-wyz][=]', s))
+                if vm_var_count >= 3 or short_assign >= 4:
+                    continue
+                if 'Tamper' in s or 'error' in s.lower() or 'warn' in s.lower():
+                    add(f'-- Anti-tamper check: "{s}"')
+                elif any(kw in s.lower() for kw in ['http', '://', 'www.', '.com', '.io', '.gg']):
+                    add(f'-- URL detected: "{s}"')
+                elif re.match(r'^%[sdifgoxq]', s) or '%' in s:
+                    add(f'string.format("{s}", ...)')
+                elif len(s) >= 8 and s.count(' ') >= 1:
+                    alpha_count = sum(1 for c in s if c.isalpha())
+                    if alpha_count >= len(s) * 0.6:
+                        add(f'-- String constant: "{s}"')
 
-                    # Skip strings that look like VM bytecode fragments
-                    if '=' in s and any(kw in s for kw in ['q[o]', 'q[S]', 'p[r[', 'q=p[r',
-                                                          'q<', 'q and', 'q or', 'q=U',
-                                                          'end else', 'end end', 'end if']):
-                        continue
-                    # Skip strings with too many VM-like patterns (generic variable names)
-                    vm_var_count = sum(1 for c in s if c == '=' )
-                    short_assign = len(re.findall(r'[a-wyz][\[=]', s))
-                    if vm_var_count >= 3 or short_assign >= 4:
-                        continue
-                    if 'Tamper' in s or 'error' in s.lower() or 'warn' in s.lower():
-                        add(f'-- Anti-tamper check: "{s}"')
-                    elif any(kw in s.lower() for kw in ['http', '://', 'www.', '.com', '.io', '.gg']):
-                        add(f'-- URL detected: "{s}"')
-                    elif re.match(r'^%[sdifgoxq]', s) or '%' in s:
-                        add(f'string.format("{s}", ...)')
-                    elif len(s) >= 8 and s.count(' ') >= 1:
-                        alpha_count = sum(1 for c in s if c.isalpha())
-                        if alpha_count >= len(s) * 0.6:
-                            add(f'-- String constant: "{s}"')
+    for m in re.finditer(r'c\(([^)]+)\)', decoded_cff):
+        expr = m.group(1).strip()
+        # Evaluate if possible (placeholder)
+        pass
 
-        # Also extract any remaining c() calls that we can evaluate
-        for m in re.finditer(r'c\(([^)]+)\)', decoded_cff):
-            expr = m.group(1).strip()
-            val = eval_arith(expr)
-            if val is not None and abs(val) < 10000000:
-                # These are unresolved accessor calls - note them
-                pass
-
-        return lines
+    return lines
 
     # ============================================================
     # Phase 4: Deep body mining (v5.2 NEW)
