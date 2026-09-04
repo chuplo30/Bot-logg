@@ -3935,7 +3935,7 @@ def _health():
     return "Bot is running."
 
 def _run_keep_alive():
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 8000))
     keep_alive_app.run(host="0.0.0.0", port=port)
 
 def start_keep_alive():
