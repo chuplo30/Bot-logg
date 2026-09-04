@@ -106,7 +106,7 @@ local function deep_stub()
     })
 end
 
-for _,g in ipairs({"task","game","Instance","TweenService","UDim2","Color3","Vector3","Vector2","CFrame","Enum","workspace","HttpService","Players","ReplicatedStorage","RunService","UserInputService","Lighting","Debris","StarterGui","StarterPlayer","StarterPack","Teams","Chat","CollectionService","PathfindingService","SoundService","TextService","GuiService","UserSettings","CoreGui","Rect","UDim","Font","NumberSequence","ColorSequence","NumberRange","TweenInfo","RaycastParams","Material","UGCValidationService","MarketplaceService"}) do
+for _,g in ipairs({"game","workspace","Instance","Enum","Players","ReplicatedStorage","RunService","TweenService","HttpService","UDim2","Color3","Vector3","CFrame","task","Vector2","UserInputService","Lighting","Debris","StarterGui","StarterPlayer","StarterPack","Teams","Chat","CollectionService","PathfindingService","SoundService","TextService","GuiService","UserSettings","CoreGui","Rect","UDim","Font","NumberSequence","ColorSequence","NumberRange","TweenInfo","RaycastParams","Material","UGCValidationService","MarketplaceService","script","shared","_G","ServerStorage","ServerScriptService","ReplicatedFirst","DataStoreService","MessagingService","BadgeService","GamePassService","InsertService","AssetService","ContentProvider","ContextActionService","LocalizationService","PhysicsService","VoiceChatService","ProximityPromptService","SocialService","TeleportService","AnalyticsService","MemoryStoreService","TextChatService","VRService","GroupService","FriendService","GamepadService","Stats","LogService","ScriptContext","SelectionService","CustomAvatarService","AvatarEditorService","PolicyService","ProcessInstancePhysicsService","HapticService","PluginManager","ChangeHistoryService","TestService","NotificationService","ExperienceNotificationService","VirtualInputManager","VirtualUser","BrickColor","Region3","Ray","Random","PhysicalProperties","OverlapParams","RaycastResult","Axes","Faces","PathWaypoint","DockWidgetPluginGuiInfo","Camera","Terrain","typeof","wait","spawn","delay","tick","warn","elapsedTime","settings","version","Drawing"}) do
     _G[g] = deep_stub()
 end
 
@@ -545,21 +545,68 @@ class IronBrewDeobfuscator:
         lines.append("")
         lines.append("-- Full deobfuscation requires VM execution (lupa)")
         return "\n".join(lines), {"method": "string extraction", "strings": len(strings)}
-
     @staticmethod
-    def _extract_strings(code: str) -> List[str]:
-        strings = []
-        str_literals = re.findall(r'"([A-Za-z_][A-Za-z0-9_]{2,})"', code)
-        api_names = {"print", "warn", "game", "Instance", "workspace", "wait",
-                     "GetService", "FindFirstChild", "Clone", "Destroy",
-                     "CFrame", "Vector3", "Color3", "UDim2", "TweenInfo",
-                     "TweenService", "Players", "LocalPlayer", "Character",
-                     "Humanoid", "Head", "Torso", "Position", "Size"}
-        for s in str_literals:
-            if s in api_names or (len(s) > 4 and s[0].islower()):
-                strings.append(s)
-        return list(set(strings))
-
+    def _extract_strings(code: str, mode: str = "all") -> List[str]:
+        strings = set()
+        
+        str_literals = re.findall(r'''(["'])((?:(?!\1).)*)\1''', code, re.DOTALL)
+        for quote, content in str_literals:
+            if content:
+                strings.add(content)
+        
+        long_strings = re.findall(r'\[=*\[(.*?)\]=*\]', code, re.DOTALL)
+        for s in long_strings:
+            if s:
+                strings.add(s.strip())
+        
+        if mode == "all":
+            identifiers = re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\b', code)
+            keywords = {"and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while"}
+            for ident in identifiers:
+                if len(ident) > 2 and ident not in keywords:
+                    strings.add(ident)
+        
+        api_names = {
+            "print", "warn", "error", "tostring", "tonumber", "type", "next", "pairs", "ipairs", "select", "unpack",
+            "game", "workspace", "script", "Instance", "new", "Clone", "Destroy", "FindFirstChild", "GetService",
+            "WaitForChild", "GetChildren", "GetDescendants", "AddTag", "HasTag", "GetTags",
+            "TweenService", "TweenInfo", "Create", "Play", "Cancel", "Pause", "Resume",
+            "Players", "LocalPlayer", "PlayerGui", "Backpack", "StarterGui", "StarterPack",
+            "Character", "Humanoid", "RootPart", "Torso", "Head", "LeftArm", "RightArm", "LeftLeg", "RightLeg",
+            "CFrame", "Vector3", "Color3", "UDim2", "Rect", "Region3", "BrickColor",
+            "RunService", "Heartbeat", "Stepped", "RenderStepped", "BindToRenderStep", "UnbindFromRenderStep",
+            "UserInputService", "InputBegan", "InputEnded", "InputChanged",
+            "ContextActionService", "BindAction", "UnbindAction",
+            "HttpService", "GetAsync", "PostAsync", "RequestAsync", "JSONDecode", "JSONEncode",
+            "DataStoreService", "GetDataStore", "SetAsync", "GetAsync", "UpdateAsync",
+            "ReplicatedStorage", "ReplicatedFirst", "ServerScriptService", "ServerStorage",
+            "SoundService", "Lighting", "Debris", "Delay", "Spawn", "wait", "task.wait"
+        }
+        for api in api_names:
+            if re.search(rf'\b{api}\b', code):
+                strings.add(api)
+        
+        table_keys = re.findall(r'\[[\'"]?([A-Za-z_][A-Za-z0-9_]*)[\'"]?\]', code)
+        for key in table_keys:
+            if key:
+                strings.add(key)
+        
+        loadstring_calls = re.findall(r'loadstring\s*\(\s*["\']([^"\']+)["\']', code)
+        for s in loadstring_calls:
+            if s:
+                strings.add(s)
+        
+        print_calls = re.findall(r'(?:print|warn)\s*\(\s*["\']([^"\']+)["\']', code)
+        for s in print_calls:
+            if s:
+                strings.add(s)
+        
+        error_calls = re.findall(r'error\s*\(\s*["\']([^"\']+)["\']', code)
+        for s in error_calls:
+            if s:
+                strings.add(s)
+        
+        return list(strings)
 
 class WANDeobfuscator:
     """WAN OBFUSCATE / WAN OBFUSCATOR: byte table + XOR + VM."""
@@ -715,26 +762,89 @@ class LuaObfuscatorFeribDeobfuscator:
 
         return code
 
-    @staticmethod
-    def _extract_strings_static(code: str) -> List[str]:
-        """Extract string constants from Ferib constant pool."""
-        strings = []
-        # Look for string literals in the code
-        str_literals = re.findall(r'"([A-Za-z_][A-Za-z0-9_]{2,})"', code)
-        api_names = {"print", "warn", "game", "Instance", "workspace", "wait",
-                     "GetService", "FindFirstChild", "Clone", "Destroy",
-                     "CFrame", "Vector3", "Color3", "UDim2", "TweenInfo",
-                     "TweenService", "Players", "LocalPlayer", "Character",
-                     "Humanoid", "Head", "Torso", "Position", "Size",
-                     "HttpGet", "HttpPost", "setreadonly", "readfile", "writefile",
-                     "getgenv", "setgenv", "getfenv", "setfenv", "loadstring",
-                     "pcall", "xpcall", "require", "spawn", "delay", "wait",
-                     "FireServer", "InvokeServer", "OnServerEvent", "OnClientEvent",
-                     "Connect", "Wait", "ChildAdded", "ChildRemoved"}
-        for s in str_literals:
+@staticmethod
+def _extract_strings_static(code: str, mode: str = "simple") -> List[str]:
+    strings = set()
+    
+    # 1. String literal "..." và '...'
+    str_literals = re.findall(r'''(["'])((?:(?!\1).)*)\1''', code, re.DOTALL)
+    for _, content in str_literals:
+        if content:
+            strings.add(content)
+    
+    # 2. Long bracket strings
+    long_strings = re.findall(r'\[=*\[(.*?)\]=*\]', code, re.DOTALL)
+    for s in long_strings:
+        if s:
+            strings.add(s.strip())
+    
+    # 3. Nếu mode == "all" → thêm tên biến/hàm
+    if mode == "all":
+        identifiers = re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\b', code)
+        keywords = {"and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while"}
+        for ident in identifiers:
+            if len(ident) > 2 and ident not in keywords:
+                strings.add(ident)
+    
+    # 4. API names (mở rộng)
+    api_names = {
+        "print", "warn", "error", "tostring", "tonumber", "type", "next", "pairs", "ipairs", "select", "unpack",
+        "game", "workspace", "script", "Instance", "new", "Clone", "Destroy", "FindFirstChild", "GetService",
+        "WaitForChild", "GetChildren", "GetDescendants", "AddTag", "HasTag", "GetTags",
+        "TweenService", "TweenInfo", "Create", "Play", "Cancel", "Pause", "Resume",
+        "Players", "LocalPlayer", "PlayerGui", "Backpack", "StarterGui", "StarterPack",
+        "Character", "Humanoid", "RootPart", "Torso", "Head", "LeftArm", "RightArm", "LeftLeg", "RightLeg",
+        "CFrame", "Vector3", "Color3", "UDim2", "Rect", "Region3", "BrickColor",
+        "RunService", "Heartbeat", "Stepped", "RenderStepped", "BindToRenderStep", "UnbindFromRenderStep",
+        "UserInputService", "InputBegan", "InputEnded", "InputChanged",
+        "ContextActionService", "BindAction", "UnbindAction",
+        "HttpService", "GetAsync", "PostAsync", "RequestAsync", "JSONDecode", "JSONEncode",
+        "DataStoreService", "GetDataStore", "SetAsync", "GetAsync", "UpdateAsync",
+        "ReplicatedStorage", "ReplicatedFirst", "ServerScriptService", "ServerStorage",
+        "SoundService", "Lighting", "Debris", "Delay", "Spawn", "wait", "task.wait",
+        "HttpGet", "HttpPost", "setreadonly", "readfile", "writefile",
+        "getgenv", "setgenv", "getfenv", "setfenv", "loadstring",
+        "pcall", "xpcall", "require", "spawn", "delay",
+        "FireServer", "InvokeServer", "OnServerEvent", "OnClientEvent",
+        "Connect", "Wait", "ChildAdded", "ChildRemoved"
+    }
+    for api in api_names:
+        if re.search(rf'\b{api}\b', code):
+            strings.add(api)
+    
+    # 5. Table keys
+    table_keys = re.findall(r'\[[\'"]?([A-Za-z_][A-Za-z0-9_]*)[\'"]?\]', code)
+    for key in table_keys:
+        if key:
+            strings.add(key)
+    
+    # 6. loadstring
+    loadstring_calls = re.findall(r'loadstring\s*\(\s*["\']([^"\']+)["\']', code)
+    for s in loadstring_calls:
+        if s:
+            strings.add(s)
+    
+    # 7. print/warn
+    print_calls = re.findall(r'(?:print|warn)\s*\(\s*["\']([^"\']+)["\']', code)
+    for s in print_calls:
+        if s:
+            strings.add(s)
+    
+    # 8. error
+    error_calls = re.findall(r'error\s*\(\s*["\']([^"\']+)["\']', code)
+    for s in error_calls:
+        if s:
+            strings.add(s)
+    
+    # 9. Lọc theo quy tắc cũ (giữ tương thích)
+    if mode == "simple":
+        result = []
+        for s in strings:
             if s in api_names or (len(s) > 4 and s[0].islower()):
-                strings.append(s)
-        return list(set(strings))
+                result.append(s)
+        return list(set(result))
+    
+    return list(strings)
 
     @staticmethod
     def deobfuscate(code: str, engine: LuaEngine, verbose: bool) -> Optional[Tuple[str, dict]]:
@@ -754,13 +864,6 @@ class LuaObfuscatorFeribDeobfuscator:
 
         # v5: filter out error messages that look like source
         is_error = (not ok) or (source and source.startswith('[string "'))
-        # v8 fix: keep the REAL failure reason around instead of discarding
-        # it. The old fallback text below used to always say the same
-        # canned "Lua 5.1/5.3 vs 5.5" guess regardless of what actually
-        # went wrong -- which could be totally unrelated (a real bug, a
-        # timeout, a missing global, etc). Surfacing the actual Lua error
-        # lets you tell the difference instead of guessing from a fixed string.
-        real_error = source if is_error and source else None
         if source and len(source) > 10 and not is_error:
             vm_indicators = ["math.ldexp", "getfenv or function", "v15(", "v16,"]
             vm_score = sum(1 for v in vm_indicators if v in source[:500])
@@ -799,11 +902,8 @@ class LuaObfuscatorFeribDeobfuscator:
         strings = LuaObfuscatorFeribDeobfuscator._extract_strings_static(code)
         pool_strings = LuaObfuscatorFeribDeobfuscator._decode_constant_pool(code)
         lines = ["-- LuaObfuscator.com (Ferib) - Structural Analysis"]
-        if real_error:
-            lines.append(f"-- Execution failed with a real Lua error (not a version guess):")
-            lines.append(f"--   {real_error[:300]}")
-        else:
-            lines.append(f"-- Note: VM execution did not produce recoverable source (no Lua error was raised)")
+        lines.append(f"-- Note: Full deobfuscation requires Lua 5.1/5.3 (current engine: Lua 5.5)")
+        lines.append(f"-- The script's internal VM has runtime incompatibilities with Lua 5.5")
         lines.append(f"")
         if pool_strings:
             lines.append(f"-- Decoded constant pool ({len(pool_strings)} entries):")
@@ -920,7 +1020,7 @@ local function deep_stub()
         __newindex=function(t,k,v) end,
     })
 end
-for _,g in ipairs({"game","workspace","Instance","Enum","Players","ReplicatedStorage","RunService","TweenService","HttpService","UDim2","Color3","Vector3","CFrame","task","Vector2","UserInputService","Lighting","Debris","StarterGui","StarterPlayer","StarterPack","Teams","Chat","CollectionService","PathfindingService","SoundService","TextService","GuiService","UserSettings","CoreGui","Rect","UDim","Font","NumberSequence","ColorSequence","NumberRange","TweenInfo","RaycastParams","Material","UGCValidationService","MarketplaceService","script","shared","_G","ServerStorage","ServerScriptService","ReplicatedFirst","DataStoreService","MessagingService","BadgeService","GamePassService","InsertService","AssetService","ContentProvider","ContextActionService","LocalizationService","PhysicsService","VoiceChatService","ProximityPromptService","SocialService","TeleportService","AnalyticsService","MemoryStoreService","TextChatService","VRService","GroupService","FriendService","GamepadService","Stats","LogService","ScriptContext","SelectionService","CustomAvatarService","AvatarEditorService","PolicyService","ProcessInstancePhysicsService","HapticService","PluginManager","ChangeHistoryService","TestService","NotificationService","ExperienceNotificationService","VirtualInputManager","VirtualUser","BrickColor","Region3","Ray","Random","PhysicalProperties","OverlapParams","RaycastResult","Axes","Faces","PathWaypoint","DockWidgetPluginGuiInfo","Camera","Terrain"}) do
+for _,g in ipairs({"game","workspace","Instance","Enum","Players","ReplicatedStorage","RunService","TweenService","HttpService","UDim2","Color3","Vector3","CFrame","task","Vector2","UserInputService","Lighting","Debris","StarterGui","StarterPlayer","StarterPack","Teams","Chat","CollectionService","PathfindingService","SoundService","TextService","GuiService","UserSettings","CoreGui","Rect","UDim","Font","NumberSequence","ColorSequence","NumberRange","TweenInfo","RaycastParams","Material","UGCValidationService","MarketplaceService","script","shared","_G","ServerStorage","ServerScriptService","ReplicatedFirst","DataStoreService","MessagingService","BadgeService","GamePassService","InsertService","AssetService","ContentProvider","ContextActionService","LocalizationService","PhysicsService","VoiceChatService","ProximityPromptService","SocialService","TeleportService","AnalyticsService","MemoryStoreService","TextChatService","VRService","GroupService","FriendService","GamepadService","Stats","LogService","ScriptContext","SelectionService","CustomAvatarService","AvatarEditorService","PolicyService","ProcessInstancePhysicsService","HapticService","PluginManager","ChangeHistoryService","TestService","NotificationService","ExperienceNotificationService","VirtualInputManager","VirtualUser","BrickColor","Region3","Ray","Random","PhysicalProperties","OverlapParams","RaycastResult","Axes","Faces","PathWaypoint","DockWidgetPluginGuiInfo","Camera","Terrain","typeof","wait","spawn","delay","tick","warn","elapsedTime","settings","version","Drawing"}) do
     _G[g] = deep_stub()
 end
 
@@ -1397,8 +1497,9 @@ class WeAreDevDeobfuscator:
 
     M_OFFSET = 472584 - 466871
 
-    # v5.3: Known API method names used by WeAreDev VM
+    # === NÂNG CẤP VM_API_NAMES ===
     VM_API_NAMES = frozenset({
+        # Roblox core (giữ nguyên)
         'GetService', 'WaitForChild', 'FindFirstChild', 'FindFirstChildOfClass',
         'Connect', 'Disconnect', 'Fire', 'FireServer', 'InvokeServer',
         'OnServerEvent', 'OnClientEvent', 'IsA', 'Clone', 'Destroy',
@@ -1407,15 +1508,74 @@ class WeAreDevDeobfuscator:
         'LoadCharacter', 'MoveTo', 'WalkTo', 'Play', 'Stop',
         'GetDataStore', 'GetAsync', 'SetAsync', 'GetOrderedDataStore',
         'ComputeAsync', 'GetWaypoints', 'CreatePath',
+        
+        # === THÊM MỚI (Roblox services) ===
+        'RunService', 'Heartbeat', 'Stepped', 'RenderStepped',
+        'BindToRenderStep', 'UnbindFromRenderStep',
+        'UserInputService', 'InputBegan', 'InputEnded', 'InputChanged',
+        'ContextActionService', 'BindAction', 'UnbindAction', 'GetAction',
+        'HttpService', 'RequestAsync', 'JSONDecode', 'JSONEncode',
+        'DataStoreService', 'GetDataStore', 'SetAsync', 'GetAsync', 'UpdateAsync',
+        'ReplicatedStorage', 'ReplicatedFirst', 'ServerScriptService', 'ServerStorage',
+        'SoundService', 'Lighting', 'Debris', 'Delay', 'Spawn', 'wait', 'task.wait',
+        'TweenService', 'TweenInfo', 'Create', 'Play', 'Cancel', 'Pause', 'Resume',
+        'Players', 'LocalPlayer', 'PlayerGui', 'Backpack', 'StarterGui', 'StarterPack',
+        'Character', 'Humanoid', 'RootPart', 'Torso', 'Head',
+        'CFrame', 'Vector3', 'Color3', 'UDim2', 'Rect', 'Region3', 'BrickColor',
+        'GetDebugId', 'GetFullName', 'GetActor', 'IsDescendantOf',
+        'AddTag', 'HasTag', 'GetTags', 'ClearAllChildren',
+        'GetBoundingBox', 'GetPivot', 'SetPivot', 'AlignPosition',
+        'TweenPosition', 'TweenSize', 'TweenRotation', 'TweenColor',
+        'GetState', 'SetState', 'GetNetworkOwner', 'SetNetworkOwner',
+        'GetPlayerFromCharacter', 'GetCharacterFromPlayer',
+        'GetMouseLocation', 'GetCamera', 'SetCamera',
+        'GetPartBounds', 'GetPartsInPart', 'GetPartsInBox', 'GetPartsInSphere',
+        'FireAllClients', 'FireClient', 'FireAllServers', 'FireServer',
+        
+        # === Synapse/executor APIs ===
+        'getgenv', 'setgenv', 'getfenv', 'setfenv', 'getrenv', 'setrenv',
+        'loadstring', 'pcall', 'xpcall', 'require', 'spawn', 'delay',
+        'syn', 'protect_gui', 'rconsoleprint', 'rconsoleinfo', 'rconsolewarn',
+        'rconsoleclear', 'rconsoleinput', 'getrawmetatable', 'setrawmetatable',
+        'iscclosure', 'isluaufunction', 'getcallingscript', 'getscriptclosure',
+        'hookfunction', 'newcclosure',
+        
+        # === WAN/Kryph/Luraph specific ===
+        'bit32', 'bit', 'bxor', 'band', 'bor', 'bnot', 'lshift', 'rshift',
+        'byte', 'char', 'sub', 'gsub', 'find', 'match', 'format', 'rep',
+        'concat', 'insert', 'remove', 'sort', 'unpack', 'pack',
     })
 
+    # === NÂNG CẤP VM_UTILITY_NAMES ===
     VM_UTILITY_NAMES = frozenset({
+        # Giữ nguyên
         'gsub', 'sub', 'find', 'match', 'format', 'rep', 'len', 'byte',
         'char', 'lower', 'upper', 'reverse', 'gmatch', 'concat',
         'tonumber', 'tostring', 'type', 'pairs', 'ipairs', 'unpack',
         'pcall', 'xpcall', 'error', 'warn', 'assert', 'select',
         'rawget', 'rawset', 'setmetatable', 'getmetatable',
         'math', 'string', 'table', 'coroutine', 'bit32',
+        
+        # === THÊM MỚI ===
+        'bit', 'bxor', 'band', 'bor', 'bnot', 'lshift', 'rshift',
+        'loadstring', 'getfenv', 'setfenv', 'getgenv', 'setgenv',
+        'getrenv', 'setrenv', 'getrawmetatable', 'setrawmetatable',
+        'iscclosure', 'isluaufunction', 'hookfunction', 'newcclosure',
+        'syn', 'protect_gui', 'rconsoleprint', 'rconsoleinfo',
+        'rconsolewarn', 'rconsoleclear', 'rconsoleinput',
+        'task', 'delay', 'spawn', 'wait', 'sleep',
+        'typeof', 'rawget', 'rawset', 'getmetatable', 'setmetatable',
+        'game', 'workspace', 'script', 'Instance', 'new', 'Clone',
+        'Destroy', 'FindFirstChild', 'GetService', 'WaitForChild',
+        'GetChildren', 'GetDescendants', 'AddTag', 'HasTag', 'GetTags',
+        'RunService', 'TweenService', 'Players', 'LocalPlayer',
+        'Character', 'Humanoid', 'UserInputService', 'HttpService',
+        'DataStoreService', 'ReplicatedStorage', 'ReplicatedFirst',
+        'ServerScriptService', 'ServerStorage', 'Lighting', 'SoundService',
+        'CFrame', 'Vector3', 'Color3', 'UDim2', 'Rect', 'Region3',
+        'BrickColor', 'TweenInfo', 'Enum', 'table', 'math', 'string',
+        'coroutine', 'debug', 'bit32', 'bit', 'os', 'io', 'utf8',
+        'string', 'table', 'math', 'coroutine', 'debug', 'bit32',
     })
 
     @staticmethod
@@ -1918,48 +2078,231 @@ class WeAreDevDeobfuscator:
                 continue
 
             # Roblox API names not in our set
-            if s in ('Instance', 'game', 'workspace', 'Enum', 'task', 'coroutine',
-                     'Color3', 'Vector3', 'Vector2', 'UDim2', 'UDim', 'CFrame',
-                     'TweenInfo', 'Rect', 'Font', 'NumberSequence', 'ColorSequence',
-                     'NumberRange', 'RaycastParams', 'PhysicalProperties',
-                     'Players', 'ReplicatedStorage', 'RunService', 'UserInputService',
-                     'TweenService', 'Lighting', 'StarterGui', 'HttpService',
-                     'DataStoreService', 'MarketplaceService', 'CollectionService',
-                     'PathfindingService', 'SoundService', 'TextService',
-                     'GuiService', 'CoreGui', 'VirtualUser', 'ContentProvider'):
-                add(f'-- VM references: {s}')
-                continue
+if s in ('Instance', 'game', 'workspace', 'Enum', 'task', 'coroutine',
+         'Color3', 'Vector3', 'Vector2', 'UDim2', 'UDim', 'CFrame',
+         'TweenInfo', 'Rect', 'Font', 'NumberSequence', 'ColorSequence',
+         'NumberRange', 'RaycastParams', 'PhysicalProperties',
+         'Players', 'ReplicatedStorage', 'RunService', 'UserInputService',
+         'TweenService', 'Lighting', 'StarterGui', 'HttpService',
+         'DataStoreService', 'MarketplaceService', 'CollectionService',
+         'PathfindingService', 'SoundService', 'TextService',
+         'GuiService', 'CoreGui', 'VirtualUser', 'ContentProvider',
+         # === THÊM MỚI ===
+         'Humanoid', 'RootPart', 'Torso', 'Head', 'LeftArm', 'RightArm',
+         'LeftLeg', 'RightLeg', 'Animation', 'Animator', 'Track',
+         'Camera', 'CurrentCamera', 'Workspace', 'Terrain', 'Material',
+         'Part', 'BasePart', 'Model', 'Folder', 'Tool', 'HopperBin',
+         'ScreenGui', 'Frame', 'TextLabel', 'TextButton', 'ImageLabel',
+         'ImageButton', 'ScrollingFrame', 'TextBox', 'TextService',
+         'ViewportFrame', 'VideoFrame', 'WebBrowser', 'SurfaceGui',
+         'BillboardGui', 'Selection', 'SelectionBox', 'SelectionLasso',
+         'Dialog', 'DialogChoice', 'Message', 'Sound', 'AudioPlayer',
+         'Video', 'Movie', 'Chat', 'VoiceChatService', 'VoiceChat',
+         'FriendService', 'GroupService', 'BadgeService', 'PassService',
+         'DeveloperProducts', 'SubscriptionService', 'PrivateServer',
+         'MemoryStoreService', 'MessagingService', 'TeleportService',
+         'ScriptContext', 'StarterPlayer', 'StarterPack', 'StarterGui',
+         'ReplicatedFirst', 'ServerStorage', 'ServerScriptService',
+         'CorePackages', 'CoreGui', 'CoreScripts', 'RobloxGui',
+         'HttpRbxApiService', 'FriendService', 'GroupService',
+         'BadgeService', 'PassService', 'DeveloperProducts',
+         'SubscriptionService', 'PrivateServer', 'VRService',
+         'MotionBlur', 'Bloom', 'Blur', 'ColorCorrection', 'DepthOfField',
+         'SunRays', 'Atmosphere', 'Clouds', 'Sky', 'Lighting',
+         'Debris', 'Spawn', 'delay', 'wait', 'task.wait', 'task.spawn',
+         'task.delay', 'task.defer', 'task.sync', 'task.desync',
+         'math', 'string', 'table', 'coroutine', 'debug', 'bit32', 'bit',
+         'utf8', 'os', 'io', 'package', 'loadstring', 'loadfile',
+         'dofile', 'print', 'warn', 'error', 'assert', 'select',
+         'tonumber', 'tostring', 'type', 'next', 'pairs', 'ipairs',
+         'unpack', 'rawget', 'rawset', 'getmetatable', 'setmetatable',
+         'pcall', 'xpcall', 'getfenv', 'setfenv', 'getgenv', 'setgenv',
+         'getrenv', 'setrenv', 'getrawmetatable', 'setrawmetatable',
+         'iscclosure', 'isluaufunction', 'hookfunction', 'newcclosure',
+         'syn', 'protect_gui', 'rconsoleprint', 'rconsoleinfo',
+         'rconsolewarn', 'rconsoleclear', 'rconsoleinput',
+         'HttpGet', 'HttpPost', 'FireServer', 'InvokeServer',
+         'OnServerEvent', 'OnClientEvent', 'BindToRenderStep',
+         'UnbindFromRenderStep', 'GetPropertyChangedSignal',
+         'GetChildren', 'GetDescendants', 'GetAttribute', 'SetAttribute',
+         'AddTag', 'HasTag', 'GetTags', 'ClearAllChildren',
+         'GetBoundingBox', 'GetPivot', 'SetPivot', 'AlignPosition',
+         'TweenPosition', 'TweenSize', 'TweenRotation', 'TweenColor',
+         'GetState', 'SetState', 'GetNetworkOwner', 'SetNetworkOwner',
+         'GetPlayerFromCharacter', 'GetCharacterFromPlayer',
+         'GetMouseLocation', 'GetCamera', 'SetCamera',
+         'GetPartBounds', 'GetPartsInPart', 'GetPartsInBox',
+         'GetPartsInSphere', 'FireAllClients', 'FireClient',
+         'FireAllServers', 'Raycast', 'WaitForChild'):
+    add(f'-- VM references: {s}')
+    continue
 
-            # String constants that look like messages, property values, identifiers
-            if len(s) >= 4 and len(s) <= 120:
-                # Property names
-                if re.match(r'^[A-Z][a-zA-Z0-9]*$', s) and s[0].isupper():
-                    if s not in ('true', 'false', 'nil', 'then', 'else', 'end', 'do',
-                                 'local', 'function', 'return', 'if', 'while', 'for',
-                                 'in', 'not', 'and', 'or', 'repeat', 'until', 'break'):
-                        # Could be a property name, Enum member, or class name
-                        if s in ('ScreenGui', 'Frame', 'TextLabel', 'TextButton',
-                                 'UICorner', 'UIPadding', 'UIStroke', 'UIListLayout',
-                                 'UIGridLayout', 'ImageLabel', 'ImageButton',
-                                 'ScrollingFrame', 'ViewportFrame', 'CanvasGroup',
-                                 'BillboardGui', 'SurfaceGui', 'Folder',
-                                 'RemoteEvent', 'RemoteFunction', 'BindableEvent',
-                                 'BindableFunction', 'ObjectValue', 'StringValue',
-                                 'BoolValue', 'IntValue', 'NumberValue',
-                                 'Humanoid', 'Part', 'Model', 'Workspace',
-                                 'Camera', 'LocalScript', 'Script', 'ModuleScript'):
-                            add(f'-- VM creates/references class: {s}')
-                        elif any(x in s for x in ['Color', 'Size', 'Position', 'Text',
-                                                    'Font', 'Visible', 'Enabled', 'Name',
-                                                    'Parent', 'Value', 'Transparency',
-                                                    'Anchor', 'Border', 'Layout', 'ZIndex',
-                                                    'Background', 'Offset', 'Scale']):
-                            add(f'-- VM sets property: {s}')
-                        elif '.' in s and s.split('.')[0] in ('Font', 'Enum', 'TweenInfo'):
-                            add(f'-- VM uses: {s}')
-                        else:
-                            add(f'-- VM identifier: {s}')
-                    continue
+# String constants that look like messages, property values, identifiers
+if len(s) >= 4 and len(s) <= 120:
+    # --- 1. XỬ LÝ CHUỖI VIẾT HOA (Class, Property, Event, Enum) ---
+    if re.match(r'^[A-Z][a-zA-Z0-9]*$', s) and s[0].isupper():
+        if s not in ('true', 'false', 'nil', 'then', 'else', 'end', 'do',
+                     'local', 'function', 'return', 'if', 'while', 'for',
+                     'in', 'not', 'and', 'or', 'repeat', 'until', 'break'):
+            # Mở rộng danh sách class names
+            CLASS_NAMES = {
+                'ScreenGui', 'Frame', 'TextLabel', 'TextButton', 'ImageLabel', 'ImageButton',
+                'ScrollingFrame', 'ViewportFrame', 'CanvasGroup', 'BillboardGui', 'SurfaceGui',
+                'UICorner', 'UIPadding', 'UIStroke', 'UIListLayout', 'UIGridLayout',
+                'UITableLayout', 'UIPageLayout', 'UIZIndex', 'UIConstraint', 'UIAspectRatioConstraint',
+                'UIEdgeInsets', 'UITextBox', 'UITextInput', 'UIAction', 'Folder',
+                'RemoteEvent', 'RemoteFunction', 'BindableEvent', 'BindableFunction',
+                'ObjectValue', 'StringValue', 'BoolValue', 'IntValue', 'NumberValue',
+                'Vector3Value', 'CFrameValue', 'Color3Value', 'Udim2Value', 'BrickColorValue',
+                'Part', 'Model', 'Workspace', 'Camera', 'Terrain', 'BasePart', 'WedgePart',
+                'CylinderPart', 'SpherePart', 'CornerWedgePart', 'TrussPart', 'Seat',
+                'VehicleSeat', 'SpawnLocation', 'Spawner', 'ForceField', 'Smoke', 'Fire',
+                'Sparkles', 'PointLight', 'SpotLight', 'SurfaceLight', 'ParticleEmitter',
+                'Trail', 'Beam', 'Attachment', 'AlignPosition', 'AlignOrientation',
+                'Humanoid', 'Animator', 'AnimationTrack', 'Animation', 'KeyframeSequence',
+                'LocalScript', 'Script', 'ModuleScript', 'Plugin', 'PluginToolbar',
+                'Tool', 'HopperBin', 'Dialog', 'DialogChoice', 'Message', 'Sound',
+                'Video', 'Movie', 'WebBrowser', 'Selection', 'SelectionBox',
+                'SelectionLasso', 'Clouds', 'Atmosphere', 'Sky', 'Bloom', 'Blur',
+                'ColorCorrection', 'DepthOfField', 'MotionBlur', 'SunRays',
+                'ScreenEffect', 'PostEffect', 'CameraEffect', 'ImageHandle',
+                'StarterGui', 'CoreGui', 'RobloxGui', 'PluginGui', 'CorePackages',
+                'Players', 'ReplicatedStorage', 'RunService', 'UserInputService',
+                'TweenService', 'Lighting', 'StarterGui', 'HttpService',
+                'DataStoreService', 'MarketplaceService', 'CollectionService',
+                'PathfindingService', 'SoundService', 'TextService',
+                'GuiService', 'CoreGui', 'VirtualUser', 'ContentProvider',
+                'ContextActionService', 'PhysicsService', 'Debris', 'LogService',
+                'TeleportService', 'FriendService', 'GroupService', 'BadgeService',
+                'PassService', 'DeveloperProducts', 'SubscriptionService', 'PrivateServer',
+                'MemoryStoreService', 'MessagingService', 'VRService', 'ChatService',
+                'VoiceChatService', 'RobloxReplicatedStorage', 'ServerStorage',
+                'ServerScriptService', 'ReplicatedFirst', 'StarterPack', 'StarterPlayer',
+                'ScriptContext', 'CoreScripts',
+            }
+            PROPERTY_KEYWORDS = {
+                'Color', 'Size', 'Position', 'Text', 'Font', 'Visible', 'Enabled', 'Name',
+                'Parent', 'Value', 'Transparency', 'Anchor', 'Border', 'Layout', 'ZIndex',
+                'Background', 'Offset', 'Scale', 'Rotation', 'Angle', 'Direction', 'Velocity',
+                'Acceleration', 'MaxForce', 'Damping', 'Friction', 'Elasticity', 'Density',
+                'Shape', 'Texture', 'Image', 'ImageColor', 'ImageRect', 'ImageSize',
+                'TextColor', 'TextSize', 'TextX', 'TextY', 'TextWrap', 'TextScaled',
+                'FontSize', 'FontStyle', 'FontWeight', 'FontName', 'FontFamily',
+                'Cursor', 'Draggable', 'Active', 'Selected', 'Hovered', 'Pressed',
+                'Click', 'Mouse', 'Key', 'Input', 'Keyboard', 'Gamepad', 'Touch',
+                'Gesture', 'Swipe', 'Pinch', 'Rotate', 'Fling', 'Pan', 'Zoom',
+                'Magnification', 'FieldOfView', 'CameraType', 'Focus', 'Subject',
+                'Health', 'MaxHealth', 'WalkSpeed', 'JumpPower', 'Gravity',
+                'Sit', 'Swim', 'Climb', 'Fall', 'Death', 'Respawn', 'Team',
+                'Score', 'Time', 'Date', 'Duration', 'Count', 'Index', 'Key',
+                'Data', 'Save', 'Load', 'Reset', 'Clear', 'Delete', 'Update',
+                'Get', 'Set', 'Add', 'Remove', 'Find', 'Search', 'Filter',
+                'Sort', 'Order', 'Random', 'Shuffle', 'Reverse', 'Copy', 'Paste',
+                'Cut', 'Move', 'Scale', 'Rotate', 'Colorize', 'Animate', 'Tween',
+                'Easing', 'Style', 'Loop', 'Ping', 'Pong', 'Latency', 'Sync',
+                'Archivable', 'CanCollide', 'CanQuery', 'CanTouch', 'CastShadow',
+                'CFrame', 'Elasticity', 'Friction', 'Locked', 'Mass', 'Material',
+                'Orientation', 'PivotOffset', 'PivotPosition', 'Rotation',
+                'RootPart', 'PrimaryPart', 'HumanoidRootPart',
+                'WalkSpeed', 'JumpPower', 'JumpHeight', 'Gravity',
+                'Health', 'MaxHealth', 'HumanoidState', 'Sit', 'PlatformStand',
+                'AutoJump', 'AutoRotate', 'Torso', 'Head', 'LeftArm', 'RightArm',
+                'LeftLeg', 'RightLeg', 'HipHeight', 'HipWidth', 'Neck',
+                'AnimatePhysics', 'BreakJointsOnDeath', 'DisplayName',
+                'AccountAge', 'MembershipType', 'Verified', 'IsOnline',
+                'GameId', 'PlaceId', 'JobId', 'DataStoreId', 'InventoryId',
+                'UserId', 'FriendId', 'GroupId', 'BadgeId', 'PassId',
+                'DeveloperProductId', 'SubscriptionId', 'PrivateServerId',
+                'AssetId', 'AssetType', 'Version', 'Created', 'Updated',
+                'Access', 'Permission', 'Owner', 'Creator', 'Author',
+                'Rating', 'Votes', 'Favorites', 'Downloads', 'Installs',
+                'Plays', 'Visits', 'Likes', 'Dislikes', 'Comments',
+                'Reports', 'Abuse', 'Moderation', 'Terms', 'Policy',
+                'Privacy', 'Public', 'Private', 'Unlisted', 'Featured',
+                'Trending', 'Popular', 'New', 'Hot', 'Top', 'Best',
+                'Sponsored', 'Advertised', 'Promoted',
+            }
+            EVENT_NAMES = {
+                'Click', 'MouseButton1Click', 'MouseButton2Click', 'MouseEnter', 'MouseLeave',
+                'MouseMoved', 'KeyDown', 'KeyUp', 'InputBegan', 'InputEnded', 'InputChanged',
+                'TouchBegan', 'TouchEnded', 'TouchMoved', 'GestureBegan', 'GestureEnded',
+                'GestureChanged', 'Swipe', 'Pinch', 'Rotate', 'Pan', 'Zoom',
+                'OnServerEvent', 'OnClientEvent', 'RemoteEvent', 'RemoteFunction',
+                'FireServer', 'InvokeServer', 'FireClient', 'FireAllClients',
+                'Heartbeat', 'Stepped', 'RenderStepped', 'PreRender', 'PostRender',
+                'BindToRenderStep', 'UnbindFromRenderStep',
+                'GetPropertyChangedSignal', 'Changed', 'ChildAdded', 'ChildRemoved',
+                'DescendantAdded', 'DescendantRemoved', 'AncestryChanged',
+                'Began', 'Ended', 'Updated', 'Cleared', 'Loaded', 'Unloaded',
+                'Ready', 'Complete', 'Canceled', 'Paused', 'Resumed', 'Stopped',
+                'Finished', 'Failed', 'Success', 'Error', 'Timeout', 'Retry',
+                'Cancel', 'Play', 'Pause', 'Stop', 'Resume', 'Seek', 'Skip',
+                'Loop', 'Shuffle', 'Reverse', 'Forward', 'Backward',
+                'Up', 'Down', 'Left', 'Right', 'Jump', 'Run', 'Walk',
+                'Sit', 'Stand', 'Crouch', 'Prone', 'Swim', 'Climb',
+                'Fall', 'Die', 'Respawn', 'Spawn', 'Join', 'Leave',
+                'Connect', 'Disconnect', 'Reconnect', 'Authenticate',
+            }
+            if s in CLASS_NAMES:
+                add(f'-- VM creates/references class: {s}')
+            elif any(x in s for x in PROPERTY_KEYWORDS):
+                add(f'-- VM sets property: {s}')
+            elif any(x in s for x in EVENT_NAMES):
+                add(f'-- VM handles event: {s}')
+            elif '.' in s and s.split('.')[0] in ('Font', 'Enum', 'TweenInfo', 'EnumItem', 'BrickColor'):
+                add(f'-- VM uses Enum/constant: {s}')
+            else:
+                add(f'-- VM identifier: {s}')
+        continue
+
+    # --- 2. XỬ LÝ CHUỖI VIẾT THƯỜNG (API, biến, hàm) ---
+    if re.match(r'^[a-z][a-zA-Z0-9_]*$', s) and s[0].islower():
+        API_CALLS = {
+            'print', 'warn', 'error', 'assert', 'pcall', 'xpcall', 'loadstring',
+            'getfenv', 'setfenv', 'getgenv', 'setgenv', 'getrenv', 'setrenv',
+            'rawget', 'rawset', 'getmetatable', 'setmetatable', 'iscclosure',
+            'isluaufunction', 'hookfunction', 'newcclosure', 'syn', 'protect_gui',
+            'rconsoleprint', 'rconsoleinfo', 'rconsolewarn', 'rconsoleclear',
+            'HttpGet', 'HttpPost', 'FireServer', 'InvokeServer', 'Wait', 'Spawn',
+            'delay', 'task.wait', 'task.spawn', 'task.delay', 'task.defer',
+        }
+        TIMER_NAMES = {'wait', 'spawn', 'delay', 'sleep', 'time', 'clock', 'date', 'os'}
+        if s in API_CALLS:
+            add(f'-- VM calls API: {s}')
+        elif s in TIMER_NAMES:
+            add(f'-- VM uses timer: {s}')
+        elif re.match(r'^[a-z]+[A-Z][a-z]', s):
+            add(f'-- VM defines function: {s}')
+        else:
+            add(f'-- VM local variable: {s}')
+        continue
+
+    # --- 3. PHÁT HIỆN CHUỖI OBFUSCATED (Base64, Hex, Base85) ---
+    if re.match(r'^[A-Za-z0-9+/=]+$', s) and len(s) >= 16:
+        try:
+            import base64
+            decoded = base64.b64decode(s + '=' * (4 - len(s) % 4))
+            if decoded:
+                add(f'-- VM Base64 string (decoded): "{decoded.decode("utf-8", errors="ignore")}"')
+        except:
+            pass
+    elif re.match(r'^[0-9A-Fa-f]+$', s) and len(s) >= 8:
+        try:
+            decoded = bytes.fromhex(s).decode('utf-8', errors='ignore')
+            if decoded:
+                add(f'-- VM hex string: "{decoded}"')
+        except:
+            pass
+    elif re.match(r'^[A-Za-z0-9!#$%&()*+,-.:;<=>?@^_`{|}~]+$', s) and len(s) >= 12:
+        add(f'-- VM encoded string (Base85?): "{s[:30]}..."')
+
+    # --- 4. PHÁT HIỆN THÔNG BÁO LỖI / TRẠNG THÁI ---
+    elif s.startswith('Error:') or s.startswith('ERROR:') or s.startswith('Warning:'):
+        add(f'-- VM error/warning message: "{s}"')
+    elif len(s) <= 40 and any(x in s for x in ['Loading', 'Ready', 'Done', 'Complete', 'Success', 'Failed']):
+        add(f'-- VM status message: "{s}"')
+    elif len(s) > 40 and not re.match(r'^[A-Za-z0-9]+$', s):
+        add(f'-- VM string literal: "{s}"')
 
                 # Messages / display text (contains spaces or special chars)
                 if any(c in s for c in [' ', '!', '?', '.', ':', '/', '\\', '%']) and not s.startswith('end'):
@@ -2044,7 +2387,7 @@ class WeAreDevDeobfuscator:
     # Phase 2: VM trace
     # ============================================================
 
-    _TRACER_LUA = 'local _trace = {}\nlocal _trace_n = 0\nlocal _orig_print = print\n\n-- v5: unpack polyfill for LuaJIT Lua 5.2+ compatibility\nif not _G.unpack then _G.unpack = table.unpack end\n\nlocal function safe_tostring(v)\n    if type(v) == "string" then\n        return string.format("%q", v)\n    end\n    if type(v) == "nil" then return "nil" end\n    if type(v) == "boolean" then return tostring(v) end\n    if type(v) == "function" then return "function" end\n    if type(v) == "table" then return "{}" end\n    return tostring(v)\nend\n\n-- v6 fix: used ONLY for values being ASSIGNED (obj.Prop = value), never\n-- for call arguments. Unlike safe_tostring, this shows the readable chain\n-- path for our tracer proxies (e.g. "game.GetService(Players).LocalPlayer")\n-- instead of collapsing every unresolved object into a bare "{}" -- which\n-- downstream reconstruction used to turn into a misleading "nil". Kept\n-- separate from safe_tostring so existing call-argument patterns (which\n-- expect a plain "{}" placeholder for the self/receiver argument) keep\n-- working unchanged.\nlocal function safe_tostring_value(v)\n    if type(v) == "table" then\n        local mt = getmetatable(v)\n        if mt and mt.__tostring then\n            return tostring(v)\n        end\n        return "{}"\n    end\n    return safe_tostring(v)\nend\n\nlocal function T(entry)\n    _trace_n = _trace_n + 1\n    _trace[_trace_n] = entry\n    _orig_print("[T]" .. entry)\nend\n\nlocal function traced_print(...)\n    local args = {...}\n    local strs = {}\n    for i, v in ipairs(args) do\n        strs[i] = tostring(v)\n    end\n    local line = table.concat(strs, "\\t")\n    _orig_print("[P]" .. line)\n    local arg_strs = {}\n    for i, v in ipairs(args) do\n        arg_strs[i] = safe_tostring(v)\n    end\n    T("print(" .. table.concat(arg_strs, ", ") .. ")")\nend\n\nlocal _cb_depth = 0\nlocal MAX_CB_DEPTH = 3\n\n-- forward declaration so helpers defined before make_chain_tracer\'s real\n-- body can still close over the correct (soon-to-be-assigned) local\nlocal make_chain_tracer\n\n-- v8: methods that return a COLLECTION of children in real Roblox\n-- (GetChildren, GetDescendants, ...). Previously these returned an opaque\n-- proxy that pairs()/ipairs() can\'t iterate, so any script whose real\n-- logic lives INSIDE such a loop (e.g. "for _,v in pairs(workspace:GetDescendants())")\n-- traced to nothing at all. Returning a real Lua table with a couple of\n-- fake-but-tracer-backed entries lets the loop body actually execute at\n-- least once, revealing what\'s inside.\nlocal ENUMERABLE_METHODS = {\n    GetChildren = true, GetDescendants = true, GetPlayers = true,\n    GetTouchingParts = true, GetConnectedParts = true,\n}\nlocal function is_enumerable_call(path)\n    for name in pairs(ENUMERABLE_METHODS) do\n        if path:sub(-#name - 1) == "." .. name then return true end\n    end\n    return false\nend\n\n-- v8: methods named "Is..." (IsA, IsDescendantOf, IsAncestorOf, ...) are\n-- boolean-returning in the real Roblox API. Returning a generic proxy here\n-- is truthy in Lua either way, but `not proxy` is always false -- which\n-- silently breaks extremely common patterns like\n-- "if v:IsA(x) and not v:IsDescendantOf(y) then". Returning a real `true`\n-- lets that boolean logic behave as intended so more branches get entered.\nlocal function is_boolean_call(path)\n    local method = path:match("%.([%w_]+)$")\n    return method ~= nil and method:sub(1, 2) == "Is"\nend\nlocal function make_fake_children(parent_path, count)\n    local list = {}\n    for i = 1, (count or 2) do\n        list[i] = make_chain_tracer(parent_path .. "[" .. i .. "]")\n    end\n    return list\nend\n\n-- v8: pick plausible dummy arguments for a callback based on the event\n-- name in its chain path, instead of always using the same generic tuple.\n-- A closer-to-real argument shape means less of the callback body bails\n-- out early on a type mismatch (e.g. "if input.KeyCode == ... then").\nlocal function get_dummy_args(path)\n    if path:find("Heartbeat", 1, true) or path:find("Stepped", 1, true)\n        or path:find("RenderStepped", 1, true) then\n        return {0.016}\n    elseif path:find("InputBegan", 1, true) or path:find("InputEnded", 1, true)\n        or path:find("InputChanged", 1, true) then\n        return {make_chain_tracer(path .. ":input"), false}\n    elseif path:find("Touched", 1, true) or path:find("TouchEnded", 1, true) then\n        return {make_chain_tracer(path .. ":part")}\n    elseif path:find("CharacterAdded", 1, true) or path:find("PlayerAdded", 1, true)\n        or path:find("PlayerRemoving", 1, true) then\n        return {make_chain_tracer(path .. ":char")}\n    else\n        return {make_chain_tracer(path .. ":cb_arg"), false, 0.016, 1}\n    end\nend\n\nfunction make_chain_tracer(name)\n    local proxy = {}\n    local full_path = name\n    local mt = {\n        __index = function(t, k)\n            local kstr = type(k) == "string" and k or tostring(k)\n            T(full_path .. "." .. kstr)\n            local new_path = full_path .. "." .. kstr\n            return make_chain_tracer(new_path)\n        end,\n        __newindex = function(t, k, v)\n            local kstr = type(k) == "string" and k or tostring(k)\n            local vstr = safe_tostring_value(v)\n            T(full_path .. "." .. kstr .. " = " .. vstr)\n        end,\n        __call = function(t, ...)\n            local raw_args = {...}\n            local args = {}\n            for i, a in ipairs(raw_args) do\n                args[i] = safe_tostring(a)\n            end\n            T(full_path .. "(" .. table.concat(args, ", ") .. ")")\n\n            -- v6 fix: keep the last STRING-typed argument as part of the\n            -- returned object\'s identity. Without this, EVERY call like\n            -- game:GetService("RunService"), game:GetService("TweenService"),\n            -- obj:WaitForChild("Name") etc. collapsed into the exact same\n            -- ambiguous path "foo()" -- so later code couldn\'t tell which\n            -- service/child a chain actually came from, and downstream\n            -- reconstruction had to guess (often guessing wrong, e.g. every\n            -- unresolved chain getting attributed to whichever service was\n            -- seen last in the script).\n            local discriminator = nil\n            for i = #raw_args, 1, -1 do\n                if type(raw_args[i]) == "string" then\n                    discriminator = raw_args[i]\n                    break\n                end\n            end\n\n            -- v6 fix: auto-invoke function arguments (event handler\n            -- callbacks). Roblox events (Heartbeat, InputBegan,\n            -- MouseButton1Click, CharacterAdded, ...) never fire on their\n            -- own during a static/offline VM run, so without this the\n            -- body of every :Connect(function() ... end) was completely\n            -- invisible to the tracer -- which is where most of a script\'s\n            -- real logic usually lives. We call it once with plausible\n            -- dummy arguments so its body actually executes and gets traced.\n            if _cb_depth < MAX_CB_DEPTH then\n                for i = 1, #raw_args do\n                    if type(raw_args[i]) == "function" then\n                        _cb_depth = _cb_depth + 1\n                        local dummy_args = get_dummy_args(full_path)\n                        local ok, err = pcall(raw_args[i], table.unpack(dummy_args))\n                        _cb_depth = _cb_depth - 1\n                        if not ok then\n                            T("-- callback error (" .. full_path .. "): " .. tostring(err))\n                        end\n                    end\n                end\n            end\n\n            -- v8: if this call is one of the known "returns a collection"\n            -- methods (GetChildren/GetDescendants/...), hand back a real,\n            -- iterable Lua table instead of another opaque chain proxy.\n            if is_enumerable_call(full_path) then\n                return make_fake_children(full_path, 2)\n            end\n            if is_boolean_call(full_path) then\n                return true\n            end\n\n            if discriminator then\n                return make_chain_tracer(full_path .. "(" .. discriminator .. ")")\n            end\n            return make_chain_tracer(full_path .. "()")\n        end,\n        __tostring = function(t) return full_path end,\n        __concat = function(a, b) return "" end,\n        __len = function(t) return 0 end,\n        __add = function(a, b) return 0 end,\n        __sub = function(a, b) return 0 end,\n        __mul = function(a, b) return 0 end,\n        __div = function(a, b) return 0 end,\n        __mod = function(a, b) return 0 end,\n        __pow = function(a, b) return 0 end,\n        __eq = function(a, b) return false end,\n        -- v8: bias toward entering branches rather than skipping them.\n        -- Comparing a proxy (unresolved value) against a real number/other\n        -- value is inherently a coin flip -- but for RECOVERY purposes,\n        -- missing real logic (false negative) is worse than tracing a\n        -- branch that wouldn\'t truly have run (false positive). Numeric\n        -- threshold checks like "if dims[3] >= 20 and dims[3] <= limit"\n        -- previously always evaluated false here, silently skipping\n        -- everything inside.\n        __lt = function(a, b) return true end,\n        __le = function(a, b) return true end,\n    }\n    setmetatable(proxy, mt)\n    return proxy\nend\nlocal make_tracer = make_chain_tracer\n\n_G.print = traced_print\n_G.warn = traced_print\n_G.info = traced_print\n\nif not _G.getfenv then _G.getfenv = function(l) return _G end end\nif not _G.getgenv then _G.getgenv = function() return _G end end\nif not _G.setfenv then _G.setfenv = function() end end\nif not _G.unpack then _G.unpack = table.unpack end\n\nlocal _orig_pcall = pcall\n_G.pcall = function(f, ...)\n    local results = {_orig_pcall(f, ...)}\n    local ok = results[1]\n    if not ok then\n        local err = tostring(results[2])\n        if not err:find("pow", 1, true) then\n            T("-- pcall error: " .. err)\n        end\n    end\n    return table.unpack(results)\nend\n\nlocal _orig_xpcall = xpcall\n_G.xpcall = function(f, handler, ...)\n    local results = {_orig_xpcall(f, handler, ...)}\n    local ok = results[1]\n    if not ok then\n        T("-- xpcall error: " .. tostring(results[2]))\n    end\n    return table.unpack(results)\nend\n\nlocal _orig_load = loadstring or load\nif _orig_load then\n    local _real_load = _orig_load\n    _G.load = function(src, ...)\n        if src == nil then return nil, "cannot load nil" end\n        if type(src) ~= "string" and type(src) ~= "function" then\n            local ok, r1, r2 = pcall(_real_load, src, ...)\n            if ok then return r1, r2 else return nil, r2 end\n        end\n        if type(src) == "string" and #src > 5 then\n            local first100 = src:sub(1, 100)\n            if not first100:find("bit32", 1, true) and not first100:find("4294967296", 1, true) then\n                T("-- loadstring called (" .. #src .. " chars)")\n            end\n        end\n        local ok, r1, r2 = pcall(_real_load, src, ...)\n        if ok then return r1, r2 else return nil, r2 end\n    end\n    _G.loadstring = _G.load\n    if debug then\n        if debug.getupvalue then\n            debug.getupvalue = function(...) return nil end\n        end\n        if debug.setupvalue then\n            debug.setupvalue = function(...) return nil end\n        end\n    end\nend\n\n_G.newproxy = function(b)\n    local t = {}\n    if b then setmetatable(t, {__index = function() return nil end}) end\n    return t\nend\n\nlocal api_names = {\n    "game", "workspace", "Instance", "Enum",\n    "Players", "ReplicatedStorage", "ReplicatedFirst",\n    "ServerStorage", "ServerScriptService", "StarterGui",\n    "StarterPlayer", "StarterPack", "StarterCharacterScripts",\n    "Lighting", "Teams", "Chat", "Debris",\n    "TweenService", "RunService", "UserInputService",\n    "HttpService", "MarketplaceService", "CollectionService",\n    "PathfindingService", "SoundService", "TextService",\n    "GuiService", "UserSettings", "CoreGui", "CorePackages",\n    "VirtualUser", "ContentProvider",\n    "DataStoreService", "BadgeService",\n    "UDim", "UDim2", "Color3", "Vector2", "Vector3",\n    "CFrame", "Ray", "Region3", "TweenInfo",\n    "Rect", "Font", "NumberSequence", "ColorSequence",\n    "NumberRange", "RaycastParams", "PhysicalProperties",\n    "task", "coroutine",\n}\n\nfor _, api_name in ipairs(api_names) do\n    _G[api_name] = make_tracer(api_name)\nend\n\n_orig_print("[STUBS_OK]")\n'
+    _TRACER_LUA = 'local _trace = {}\nlocal _trace_n = 0\nlocal _orig_print = print\n\n-- v5: unpack polyfill for LuaJIT Lua 5.2+ compatibility\nif not _G.unpack then _G.unpack = table.unpack end\n\nlocal function safe_tostring(v)\n    if type(v) == "string" then\n        return string.format("%q", v)\n    end\n    if type(v) == "nil" then return "nil" end\n    if type(v) == "boolean" then return tostring(v) end\n    if type(v) == "function" then return "function" end\n    if type(v) == "table" then return "{}" end\n    return tostring(v)\nend\n\n-- v6 fix: used ONLY for values being ASSIGNED (obj.Prop = value), never\n-- for call arguments. Unlike safe_tostring, this shows the readable chain\n-- path for our tracer proxies (e.g. "game.GetService(Players).LocalPlayer")\n-- instead of collapsing every unresolved object into a bare "{}" -- which\n-- downstream reconstruction used to turn into a misleading "nil". Kept\n-- separate from safe_tostring so existing call-argument patterns (which\n-- expect a plain "{}" placeholder for the self/receiver argument) keep\n-- working unchanged.\nlocal function safe_tostring_value(v)\n    if type(v) == "table" then\n        local mt = getmetatable(v)\n        if mt and mt.__tostring then\n            return tostring(v)\n        end\n        return "{}"\n    end\n    return safe_tostring(v)\nend\n\nlocal function T(entry)\n    _trace_n = _trace_n + 1\n    _trace[_trace_n] = entry\n    _orig_print("[T]" .. entry)\nend\n\nlocal function traced_print(...)\n    local args = {...}\n    local strs = {}\n    for i, v in ipairs(args) do\n        strs[i] = tostring(v)\n    end\n    local line = table.concat(strs, "\\t")\n    _orig_print("[P]" .. line)\n    local arg_strs = {}\n    for i, v in ipairs(args) do\n        arg_strs[i] = safe_tostring(v)\n    end\n    T("print(" .. table.concat(arg_strs, ", ") .. ")")\nend\n\nlocal _cb_depth = 0\nlocal MAX_CB_DEPTH = 3\n\nlocal function make_chain_tracer(name)\n    local proxy = {}\n    local full_path = name\n    local mt = {\n        __index = function(t, k)\n            local kstr = type(k) == "string" and k or tostring(k)\n            T(full_path .. "." .. kstr)\n            local new_path = full_path .. "." .. kstr\n            return make_chain_tracer(new_path)\n        end,\n        __newindex = function(t, k, v)\n            local kstr = type(k) == "string" and k or tostring(k)\n            local vstr = safe_tostring_value(v)\n            T(full_path .. "." .. kstr .. " = " .. vstr)\n        end,\n        __call = function(t, ...)\n            local raw_args = {...}\n            local args = {}\n            for i, a in ipairs(raw_args) do\n                args[i] = safe_tostring(a)\n            end\n            T(full_path .. "(" .. table.concat(args, ", ") .. ")")\n\n            -- v6 fix: keep the last STRING-typed argument as part of the\n            -- returned object\'s identity. Without this, EVERY call like\n            -- game:GetService("RunService"), game:GetService("TweenService"),\n            -- obj:WaitForChild("Name") etc. collapsed into the exact same\n            -- ambiguous path "foo()" -- so later code couldn\'t tell which\n            -- service/child a chain actually came from, and downstream\n            -- reconstruction had to guess (often guessing wrong, e.g. every\n            -- unresolved chain getting attributed to whichever service was\n            -- seen last in the script).\n            local discriminator = nil\n            for i = #raw_args, 1, -1 do\n                if type(raw_args[i]) == "string" then\n                    discriminator = raw_args[i]\n                    break\n                end\n            end\n\n            -- v6 fix: auto-invoke function arguments (event handler\n            -- callbacks). Roblox events (Heartbeat, InputBegan,\n            -- MouseButton1Click, CharacterAdded, ...) never fire on their\n            -- own during a static/offline VM run, so without this the\n            -- body of every :Connect(function() ... end) was completely\n            -- invisible to the tracer -- which is where most of a script\'s\n            -- real logic usually lives. We call it once with plausible\n            -- dummy arguments so its body actually executes and gets traced.\n            if _cb_depth < MAX_CB_DEPTH then\n                for i = 1, #raw_args do\n                    if type(raw_args[i]) == "function" then\n                        _cb_depth = _cb_depth + 1\n                        local dummy1 = make_chain_tracer(full_path .. ":cb_arg")\n                        local ok, err = pcall(raw_args[i], dummy1, false, 0.016, 1)\n                        _cb_depth = _cb_depth - 1\n                        if not ok then\n                            T("-- callback error (" .. full_path .. "): " .. tostring(err))\n                        end\n                    end\n                end\n            end\n\n            if discriminator then\n                return make_chain_tracer(full_path .. "(" .. discriminator .. ")")\n            end\n            return make_chain_tracer(full_path .. "()")\n        end,\n        __tostring = function(t) return full_path end,\n        __concat = function(a, b) return "" end,\n        __len = function(t) return 0 end,\n        __add = function(a, b) return 0 end,\n        __sub = function(a, b) return 0 end,\n        __mul = function(a, b) return 0 end,\n        __div = function(a, b) return 0 end,\n        __mod = function(a, b) return 0 end,\n        __pow = function(a, b) return 0 end,\n        __eq = function(a, b) return false end,\n        __lt = function(a, b) return false end,\n        __le = function(a, b) return false end,\n    }\n    setmetatable(proxy, mt)\n    return proxy\nend\nlocal make_tracer = make_chain_tracer\n\n_G.print = traced_print\n_G.warn = traced_print\n_G.info = traced_print\n\nif not _G.getfenv then _G.getfenv = function(l) return _G end end\nif not _G.getgenv then _G.getgenv = function() return _G end end\nif not _G.setfenv then _G.setfenv = function() end end\nif not _G.unpack then _G.unpack = table.unpack end\n\nlocal _orig_pcall = pcall\n_G.pcall = function(f, ...)\n    local results = {_orig_pcall(f, ...)}\n    local ok = results[1]\n    if not ok then\n        local err = tostring(results[2])\n        if not err:find("pow", 1, true) then\n            T("-- pcall error: " .. err)\n        end\n    end\n    return table.unpack(results)\nend\n\nlocal _orig_xpcall = xpcall\n_G.xpcall = function(f, handler, ...)\n    local results = {_orig_xpcall(f, handler, ...)}\n    local ok = results[1]\n    if not ok then\n        T("-- xpcall error: " .. tostring(results[2]))\n    end\n    return table.unpack(results)\nend\n\nlocal _orig_load = loadstring or load\nif _orig_load then\n    local _real_load = _orig_load\n    _G.load = function(src, ...)\n        if src == nil then return nil, "cannot load nil" end\n        if type(src) ~= "string" and type(src) ~= "function" then\n            local ok, r1, r2 = pcall(_real_load, src, ...)\n            if ok then return r1, r2 else return nil, r2 end\n        end\n        if type(src) == "string" and #src > 5 then\n            local first100 = src:sub(1, 100)\n            if not first100:find("bit32", 1, true) and not first100:find("4294967296", 1, true) then\n                T("-- loadstring called (" .. #src .. " chars)")\n            end\n        end\n        local ok, r1, r2 = pcall(_real_load, src, ...)\n        if ok then return r1, r2 else return nil, r2 end\n    end\n    _G.loadstring = _G.load\n    if debug then\n        if debug.getupvalue then\n            debug.getupvalue = function(...) return nil end\n        end\n        if debug.setupvalue then\n            debug.setupvalue = function(...) return nil end\n        end\n    end\nend\n\n_G.newproxy = function(b)\n    local t = {}\n    if b then setmetatable(t, {__index = function() return nil end}) end\n    return t\nend\n\nlocal api_names = {\n    "game", "workspace", "Instance", "Enum",\n    "Players", "ReplicatedStorage", "ReplicatedFirst",\n    "ServerStorage", "ServerScriptService", "StarterGui",\n    "StarterPlayer", "StarterPack", "StarterCharacterScripts",\n    "Lighting", "Teams", "Chat", "Debris",\n    "TweenService", "RunService", "UserInputService",\n    "HttpService", "MarketplaceService", "CollectionService",\n    "PathfindingService", "SoundService", "TextService",\n    "GuiService", "UserSettings", "CoreGui", "CorePackages",\n    "VirtualUser", "ContentProvider",\n    "DataStoreService", "BadgeService",\n    "UDim", "UDim2", "Color3", "Vector2", "Vector3",\n    "CFrame", "Ray", "Region3", "TweenInfo",\n    "Rect", "Font", "NumberSequence", "ColorSequence",\n    "NumberRange", "RaycastParams", "PhysicalProperties",\n    "task", "coroutine",\n}\n\nfor _, api_name in ipairs(api_names) do\n    _G[api_name] = make_tracer(api_name)\nend\n\n_orig_print("[STUBS_OK]")\n'
 
     @staticmethod
     def _get_tracer_lua() -> str:
@@ -2095,13 +2438,149 @@ class WeAreDevDeobfuscator:
     # ============================================================
     # Phase 5: Source reconstruction (v5.2 UPGRADED)
     # ============================================================
-
-    COLON_METHODS = frozenset({
-        'GetService', 'WaitForChild', 'FindFirstChild', 'FindFirstChildOfClass',
-        'FindFirstChildWhichIsA', 'IsA', 'Clone', 'Destroy', 'Connect',
-        'Disconnect', 'InvokeServer', 'FireServer', 'Fire', 'OnServerEvent',
-        'OnClientEvent', 'HttpGet', 'HttpPost', 'Wait', 'GetPropertyChangedSignal',
-    })
+COLON_METHODS = frozenset({
+    # === ROBLOX CORE ===
+    'GetService', 'WaitForChild', 'FindFirstChild', 'FindFirstChildOfClass',
+    'FindFirstChildWhichIsA', 'IsA', 'Clone', 'Destroy', 'Connect',
+    'Disconnect', 'InvokeServer', 'FireServer', 'Fire', 'OnServerEvent',
+    'OnClientEvent', 'HttpGet', 'HttpPost', 'Wait', 'GetPropertyChangedSignal',
+    
+    # === INSTANCE METHODS ===
+    'GetChildren', 'GetDescendants', 'GetAttribute', 'SetAttribute',
+    'AddTag', 'HasTag', 'GetTags', 'ClearAllChildren',
+    'GetBoundingBox', 'GetPivot', 'SetPivot', 'AlignPosition',
+    'TweenPosition', 'TweenSize', 'TweenRotation', 'TweenColor',
+    'GetState', 'SetState', 'GetNetworkOwner', 'SetNetworkOwner',
+    'GetPlayerFromCharacter', 'GetCharacterFromPlayer',
+    'GetMouseLocation', 'GetCamera', 'SetCamera',
+    'GetPartBounds', 'GetPartsInPart', 'GetPartsInBox', 'GetPartsInSphere',
+    'FireAllClients', 'FireClient', 'FireAllServers', 'Raycast',
+    'GetFullName', 'GetActor', 'IsDescendantOf', 'GetDebugId',
+    'ChildAdded', 'ChildRemoved', 'DescendantAdded', 'DescendantRemoved',
+    'AncestryChanged', 'Changed', 'GetTouchingParts', 'GetPartsInRegion',
+    'GetChildren', 'GetDescendants', 'GetPropertyChangedSignal',
+    'FindFirstChildWhichIsA', 'WaitForChild', 'GetService',
+    'GetPivot', 'SetPivot', 'AlignOrientation', 'GetBoundingBox',
+    'GetPartBoundsInBox', 'GetPartBoundsInSphere', 'GetPartBoundsInRegion',
+    
+    # === HUMANOID METHODS ===
+    'LoadCharacter', 'MoveTo', 'WalkTo', 'Jump', 'Sit', 'Stand',
+    'GetState', 'SetState', 'GetHealth', 'SetHealth',
+    'GetMaxHealth', 'SetMaxHealth', 'GetWalkSpeed', 'SetWalkSpeed',
+    'GetJumpPower', 'SetJumpPower', 'GetGravity', 'SetGravity',
+    'GetHumanoidState', 'SetHumanoidState', 'GetPlatformStand',
+    'SetPlatformStand', 'AutoJump', 'AutoRotate', 'GetTorso',
+    'GetHead', 'GetLeftArm', 'GetRightArm', 'GetLeftLeg', 'GetRightLeg',
+    'GetHipHeight', 'GetHipWidth', 'GetNeck', 'AnimatePhysics',
+    'BreakJointsOnDeath', 'GetDisplayName', 'GetAccountAge',
+    'GetMembershipType', 'GetVerified', 'IsOnline',
+    
+    # === TWEEN SERVICE ===
+    'Create', 'Play', 'Pause', 'Resume', 'Cancel', 'Stop',
+    'GetTweenInfo', 'SetTweenInfo', 'GetPlaybackState',
+    'GetTime', 'SetTime', 'GetSpeed', 'SetSpeed',
+    'GetEasingStyle', 'SetEasingStyle', 'GetEasingDirection',
+    'SetEasingDirection', 'GetRepeatCount', 'SetRepeatCount',
+    'GetReverses', 'SetReverses', 'GetDelayTime', 'SetDelayTime',
+    
+    # === DATASTORE METHODS ===
+    'GetAsync', 'SetAsync', 'UpdateAsync', 'GetDataStore',
+    'GetOrderedDataStore', 'GetDataStoreList', 'RemoveAsync',
+    'GetDataStoreStats', 'GetDataStoreHistory',
+    
+    # === PATHFINDING ===
+    'CreatePath', 'GetWaypoints', 'GetPathLength', 'GetPathTime',
+    'GetBlockedWaypoints', 'GetWaypointPosition', 'GetWaypointInfo',
+    'ComputeAsync', 'GetPathStatus', 'GetPathError',
+    
+    # === RUN SERVICE ===
+    'BindToRenderStep', 'UnbindFromRenderStep', 'GetRenderStep',
+    'GetStep', 'GetHeartbeat', 'GetStepped',
+    
+    # === HTTP SERVICE ===
+    'RequestAsync', 'JSONDecode', 'JSONEncode', 'GetAsync', 'PostAsync',
+    'DeleteAsync', 'HeadAsync', 'PatchAsync', 'PutAsync',
+    'GetRequestAsync', 'PostRequestAsync',
+    
+    # === PLAYERS ===
+    'GetPlayers', 'GetPlayer', 'GetPlayerByUserId', 'GetPlayerByCharacter',
+    'GetPlayerFromCharacter', 'GetCharacterFromPlayer',
+    'GetPlayerGui', 'GetBackpack', 'GetStarterGui', 'GetStarterPack',
+    'GetCharacter', 'LoadCharacter', 'GetMouseLocation',
+    'GetCamera', 'SetCamera', 'GetCameraFocus', 'SetCameraFocus',
+    
+    # === SOUND ===
+    'Play', 'Stop', 'Pause', 'Resume', 'GetTime', 'SetTime',
+    'GetVolume', 'SetVolume', 'GetPitch', 'SetPitch',
+    'GetPlaybackLoudness', 'GetSoundId', 'SetSoundId',
+    'GetLooped', 'SetLooped', 'GetPlaying', 'GetPlaybackPosition',
+    
+    # === ANIMATION ===
+    'LoadAnimation', 'Play', 'Stop', 'Pause', 'Resume',
+    'GetKeyframeSequence', 'GetAnimationTrack', 'GetPriority',
+    'GetSpeed', 'SetSpeed', 'GetTime', 'SetTime',
+    
+    # === UI ===
+    'SetAttribute', 'GetAttribute', 'GetAttributes', 'ClearAttributes',
+    'GetPosition', 'SetPosition', 'GetSize', 'SetSize',
+    'GetRotation', 'SetRotation', 'GetTransparency', 'SetTransparency',
+    'GetColor', 'SetColor', 'GetText', 'SetText',
+    'GetFont', 'SetFont', 'GetTextSize', 'SetTextSize',
+    'GetTextColor', 'SetTextColor', 'GetBackgroundColor',
+    'SetBackgroundColor', 'GetBorderColor', 'SetBorderColor',
+    'GetVisible', 'SetVisible', 'GetEnabled', 'SetEnabled',
+    'GetActive', 'SetActive', 'GetSelected', 'SetSelected',
+    
+    # === LIGHTING ===
+    'GetAmbient', 'SetAmbient', 'GetBrightness', 'SetBrightness',
+    'GetColorShiftTop', 'SetColorShiftTop', 'GetColorShiftBottom',
+    'SetColorShiftBottom', 'GetOutdoorAmbient', 'SetOutdoorAmbient',
+    'GetShadowSoftness', 'SetShadowSoftness', 'GetTechnology',
+    'SetTechnology', 'GetGlobalShadows', 'SetGlobalShadows',
+    
+    # === WORKSPACE ===
+    'GetTerrain', 'GetPartsInBox', 'GetPartsInSphere', 'GetPartsInRegion',
+    'GetPartBoundsInBox', 'GetPartBoundsInSphere', 'GetPartBoundsInRegion',
+    'Raycast', 'GetRaycast', 'SetRaycast', 'GetPhysicsSettings',
+    'SetPhysicsSettings', 'GetGravity', 'SetGravity',
+    
+    # === TWEEN SERVICE ===
+    'Create', 'Play', 'Pause', 'Resume', 'Cancel', 'Stop',
+    'GetTweenInfo', 'SetTweenInfo', 'GetPlaybackState',
+    'GetTime', 'SetTime', 'GetSpeed', 'SetSpeed',
+    'GetEasingStyle', 'SetEasingStyle', 'GetEasingDirection',
+    'SetEasingDirection', 'GetRepeatCount', 'SetRepeatCount',
+    'GetReverses', 'SetReverses', 'GetDelayTime', 'SetDelayTime',
+    
+    # === RUN SERVICE ===
+    'BindToRenderStep', 'UnbindFromRenderStep', 'GetRenderStep',
+    'GetStep', 'GetHeartbeat', 'GetStepped',
+    
+    # === SCRIPT CONTEXT ===
+    'GetScripts', 'GetModuleScripts', 'GetLocalScripts',
+    'GetServerScripts', 'GetClientScripts', 'GetCoreScripts',
+    
+    # === MARKETPLACE ===
+    'GetProductInfo', 'GetProductId', 'GetProductPrice',
+    'GetProductDescription', 'GetProductTitle', 'GetProductIcon',
+    'GetProductImage', 'GetProductVideo', 'GetProductScreenshots',
+    
+    # === COLLECTION SERVICE ===
+    'GetCollection', 'GetCollections', 'GetCollectionTags',
+    'AddTag', 'HasTag', 'GetTags', 'ClearAllChildren',
+    
+    # === TEXT SERVICE ===
+    'GetTextSize', 'GetTextWidth', 'GetTextHeight',
+    'GetTextBoundingBox', 'GetTextWrap', 'GetTextAlignment',
+    
+    # === SOUND SERVICE ===
+    'GetSound', 'GetSoundId', 'GetSoundName', 'GetSoundVolume',
+    'GetSoundPitch', 'GetSoundLooped', 'GetSoundPlaying',
+    
+    # === HTTP RBX API SERVICE ===
+    'GetAsync', 'PostAsync', 'DeleteAsync', 'HeadAsync',
+    'PatchAsync', 'PutAsync', 'GetRequestAsync', 'PostRequestAsync',
+})
 
     @staticmethod
     def _clean_chain(chain: str, service_names: set, last_service_var: str = None) -> str:
@@ -2463,86 +2942,494 @@ class WeAreDevDeobfuscator:
         for m in re.finditer(r'local (\w+)\s*=\s*(\{)', resolved_cff):
             add(f'local {m.group(1)} = {{ ... }}')
         return lines
+@staticmethod
+def _mine_cff_code(resolved_cff: str, string_map: Dict[int, str] = None) -> List[str]:
+    if not resolved_cff:
+        return []
+    
+    code_lines, seen = [], set()
+    def add(line):
+        if line and line not in seen:
+            seen.add(line)
+            code_lines.append(line)
 
-    @staticmethod
-    def _mine_cff_code(resolved_cff: str, string_map: Dict[int, str] = None) -> List[str]:
-        if not resolved_cff:
-            return []
-        code_lines, seen = [], set()
-        def add(line):
-            if line and line not in seen:
-                seen.add(line)
-                code_lines.append(line)
-        if ':GetService("' in resolved_cff:
-            for m in re.finditer(r':GetService\("([^"]+)"\)', resolved_cff):
-                add(f'game:GetService("{m.group(1)}")')
-        for m in re.finditer(r'Instance[.]new\("([^"]+)"\)', resolved_cff):
-            add(f'Instance.new("{m.group(1)}")')
-        for m in re.finditer(r':WaitForChild\("([^"]+)"\)', resolved_cff):
-            add(f':WaitForChild("{m.group(1)}")')
-        for m in re.finditer(r':FindFirstChild\("([^"]+)"\)', resolved_cff):
-            add(f':FindFirstChild("{m.group(1)}")')
-        for m in re.finditer(r':FindFirstChildOfClass\("([^"]+)"\)', resolved_cff):
-            add(f':FindFirstChildOfClass("{m.group(1)}")')
-        for m in re.finditer(r'(?:HttpGet|HttpPost)\("(https?://[^"]+)"\)', resolved_cff):
-            add(f':HttpGet("{m.group(1)}")')
-        for m in re.finditer(r':SetAttribute\("([^"]+)"', resolved_cff): add(f':SetAttribute("{m.group(1)}", ...)')
-        for m in re.finditer(r':GetAttribute\("([^"]+)"\)', resolved_cff): add(f':GetAttribute("{m.group(1)}")')
-        for m in re.finditer(r'\.(OnServerEvent|OnClientEvent)\("([^"]+)"\)', resolved_cff): add(f'.{m.group(1)}("{m.group(2)}")')
-        for m in re.finditer(r'\.(InvokeServer|FireServer)\("([^"]+)"\)', resolved_cff): add(f':{m.group(1)}("{m.group(2)}")')
-        for m in re.finditer(r'require\("([^"]+)"\)', resolved_cff): add(f'require("{m.group(1)}")')
-        for m in re.finditer(r'Enum\.([A-Z]\w+\.[A-Z]\w+)', resolved_cff): add(f'Enum.{m.group(1)}')
-        for m in re.finditer(r'\.(?:[Tt]ext|[Nn]ame)\s*=\s*"([^"]{2,})"', resolved_cff):
-            prop, val = m.group(0).split('=', 1)
-            val = val.strip()
-            if not re.match(r'^"[A-Za-z0-9]{8,}"$', val):
-                add(m.group(0))
-        for m in re.finditer(r'string\.format\("([^"]{3,})"', resolved_cff):
-            fmt = m.group(1)
-            if '%' in fmt and len(fmt) < 200: add(f'string.format("{fmt}", ...)')
-        for m in re.finditer(r'(?:error|warn|assert)\("([^"]{5,})"', resolved_cff):
-            msg = m.group(1)
-            if len(msg) > 10 and not re.match(r'^[A-Za-z0-9]{8,}$', msg): add(m.group(0))
-        for m in re.finditer(r'print\("([^"]{5,})"\)', resolved_cff):
-            msg = m.group(1)
-            if len(msg) > 5 and not re.match(r'^[A-Za-z0-9]{8,}$', msg): add(f'print("{msg}")')
-        if resolved_cff.count('TweenService') > 0 and ':Create(' in resolved_cff: add('TweenService:Create(...)')
-        for m in re.finditer(r'"(\d{8,12})"', resolved_cff): add(f'-- Asset ID: {m.group(1)}')
-        for pat in [':GetChildren()', ':GetDescendants()', ':IsA(', ':Clone()', ':Destroy()', ':Wait()', ':Play()', ':Stop()', ':LoadCharacter()', ':MoveTo(', ':WalkTo(', ':CreatePath()', ':ComputeAsync(', ':GetWaypoints()']:
-            if pat in resolved_cff: add(pat)
-        for m in re.finditer(r':IsA\("([^"]+)"\)', resolved_cff): add(f':IsA("{m.group(1)}")')
-        for pat, label in [('.Parent =', '.Parent = ...'), ('.Visible =', None), ('.Enabled =', None),
-                          ('.Value =', '.Value = ...'), ('.Position =', '.Position = ...'),
-                          ('.Size =', '.Size = ...'), ('.BackgroundColor3 =', '.BackgroundColor3 = ...'),
-                          ('.TextColor3 =', '.TextColor3 = ...'), ('.Font =', '.Font = ...'),
-                          ('.TextSize =', '.TextSize = ...'), ('.Transparency =', '.Transparency = ...'),
-                          ('.AnchorPoint =', '.AnchorPoint = ...'), ('.BackgroundTransparency =', '.BackgroundTransparency = ...'),
-                          ('.BorderSizePixel =', '.BorderSizePixel = ...'), ('.ZIndex =', '.ZIndex = ...'),
-                          ('.LayoutOrder =', '.LayoutOrder = ...')]:
-            if pat in resolved_cff:
-                if label: add(label)
-                else:
-                    for vm in re.finditer(re.escape(pat) + r'(true|false)', resolved_cff):
-                        add(f'{pat}{vm.group(1)}')
-        for pat in ['CFrame.new(', 'Vector3.new(', 'Vector2.new(', 'UDim2.new(', 'Color3.fromRGB(', 'TweenInfo.new(', 'math.random(', 'task.wait(', 'task.spawn(', 'task.delay(', 'coroutine.wrap(', 'pcall(', 'xpcall(']:
-            if pat in resolved_cff: add(pat + '...)')
-        if '.Changed:' in resolved_cff: add('.Changed:Connect(...)')
-        for m in re.finditer(r'GetPropertyChangedSignal\("([^"]+)"\)', resolved_cff): add(f':GetPropertyChangedSignal("{m.group(1)}")')
-        if 'CharacterAdded:' in resolved_cff: add('.CharacterAdded:Connect(function(character)')
-        if 'InputBegan:' in resolved_cff: add('.InputBegan:Connect(function(input, gameProcessed)')
-        if 'InputEnded:' in resolved_cff: add('.InputEnded:Connect(function(input, gameProcessed)')
-        if 'Heartbeat:' in resolved_cff: add('.Heartbeat:Connect(function(dt)')
-        if 'DataStoreService' in resolved_cff: add('game:GetService("DataStoreService")')
-        for m in re.finditer(r':GetDataStore\("([^"]+)"\)', resolved_cff): add(f':GetDataStore("{m.group(1)}")')
-        if ':GetAsync(' in resolved_cff: add(':GetAsync(...)')
-        if ':SetAsync(' in resolved_cff: add(':SetAsync(...)')
-        if ':GetOrderedDataStore(' in resolved_cff: add(':GetOrderedDataStore(...)')
-        if 'PathfindingService' in resolved_cff: add('game:GetService("PathfindingService")')
-        if 'UserInputService' in resolved_cff: add('game:GetService("UserInputService")')
-        for m in re.finditer(r'rbxassetid://(\d+)', resolved_cff): add(f'-- rbxassetid://{m.group(1)}')
-        for pat in ['UIGradient', 'UIPadding', 'UICorner', 'UIStroke', 'UISizeConstraint', 'UIListLayout', 'UIGridLayout', 'UIPageLayout', 'UITableLayout']:
-            if pat in resolved_cff: add(pat)
-        return code_lines
+    # --- 1. GET SERVICE PATTERNS ---
+    services = {
+        'Players': 'game:GetService("Players")',
+        'ReplicatedStorage': 'game:GetService("ReplicatedStorage")',
+        'RunService': 'game:GetService("RunService")',
+        'UserInputService': 'game:GetService("UserInputService")',
+        'TweenService': 'game:GetService("TweenService")',
+        'Lighting': 'game:GetService("Lighting")',
+        'StarterGui': 'game:GetService("StarterGui")',
+        'HttpService': 'game:GetService("HttpService")',
+        'DataStoreService': 'game:GetService("DataStoreService")',
+        'MarketplaceService': 'game:GetService("MarketplaceService")',
+        'CollectionService': 'game:GetService("CollectionService")',
+        'PathfindingService': 'game:GetService("PathfindingService")',
+        'SoundService': 'game:GetService("SoundService")',
+        'TextService': 'game:GetService("TextService")',
+        'GuiService': 'game:GetService("GuiService")',
+        'CoreGui': 'game:GetService("CoreGui")',
+        'VirtualUser': 'game:GetService("VirtualUser")',
+        'ContentProvider': 'game:GetService("ContentProvider")',
+        'ContextActionService': 'game:GetService("ContextActionService")',
+        'PhysicsService': 'game:GetService("PhysicsService")',
+        'Debris': 'game:GetService("Debris")',
+        'LogService': 'game:GetService("LogService")',
+        'TeleportService': 'game:GetService("TeleportService")',
+        'FriendService': 'game:GetService("FriendService")',
+        'GroupService': 'game:GetService("GroupService")',
+        'BadgeService': 'game:GetService("BadgeService")',
+        'PassService': 'game:GetService("PassService")',
+        'DeveloperProducts': 'game:GetService("DeveloperProducts")',
+        'SubscriptionService': 'game:GetService("SubscriptionService")',
+        'PrivateServer': 'game:GetService("PrivateServer")',
+        'MemoryStoreService': 'game:GetService("MemoryStoreService")',
+        'MessagingService': 'game:GetService("MessagingService")',
+        'VRService': 'game:GetService("VRService")',
+        'ChatService': 'game:GetService("ChatService")',
+        'VoiceChatService': 'game:GetService("VoiceChatService")',
+        'RobloxReplicatedStorage': 'game:GetService("RobloxReplicatedStorage")',
+        'ServerStorage': 'game:GetService("ServerStorage")',
+        'ServerScriptService': 'game:GetService("ServerScriptService")',
+        'ReplicatedFirst': 'game:GetService("ReplicatedFirst")',
+        'StarterPack': 'game:GetService("StarterPack")',
+        'StarterPlayer': 'game:GetService("StarterPlayer")',
+        'ScriptContext': 'game:GetService("ScriptContext")',
+        'CorePackages': 'game:GetService("CorePackages")',
+    }
+    for service_name, service_line in services.items():
+        if service_name in resolved_cff:
+            add(service_line)
+
+    # --- 2. INSTANCE.NEW ---
+    class_names = {
+        'ScreenGui', 'Frame', 'TextLabel', 'TextButton', 'ImageLabel', 'ImageButton',
+        'ScrollingFrame', 'ViewportFrame', 'CanvasGroup', 'BillboardGui', 'SurfaceGui',
+        'UICorner', 'UIPadding', 'UIStroke', 'UIListLayout', 'UIGridLayout',
+        'UITableLayout', 'UIPageLayout', 'UIZIndex', 'UIConstraint', 'UIAspectRatioConstraint',
+        'UIEdgeInsets', 'UITextBox', 'UITextInput', 'UIAction', 'Folder',
+        'RemoteEvent', 'RemoteFunction', 'BindableEvent', 'BindableFunction',
+        'ObjectValue', 'StringValue', 'BoolValue', 'IntValue', 'NumberValue',
+        'Vector3Value', 'CFrameValue', 'Color3Value', 'Udim2Value', 'BrickColorValue',
+        'Part', 'Model', 'Workspace', 'Camera', 'Terrain', 'BasePart', 'WedgePart',
+        'CylinderPart', 'SpherePart', 'CornerWedgePart', 'TrussPart', 'Seat',
+        'VehicleSeat', 'SpawnLocation', 'Spawner', 'ForceField', 'Smoke', 'Fire',
+        'Sparkles', 'PointLight', 'SpotLight', 'SurfaceLight', 'ParticleEmitter',
+        'Trail', 'Beam', 'Attachment', 'AlignPosition', 'AlignOrientation',
+        'Humanoid', 'Animator', 'AnimationTrack', 'Animation', 'KeyframeSequence',
+        'LocalScript', 'Script', 'ModuleScript', 'Plugin', 'PluginToolbar',
+        'Tool', 'HopperBin', 'Dialog', 'DialogChoice', 'Message', 'Sound',
+        'Video', 'Movie', 'WebBrowser', 'Selection', 'SelectionBox',
+        'SelectionLasso', 'Clouds', 'Atmosphere', 'Sky', 'Bloom', 'Blur',
+        'ColorCorrection', 'DepthOfField', 'MotionBlur', 'SunRays',
+        'ScreenEffect', 'PostEffect', 'CameraEffect', 'ImageHandle',
+        'StarterGui', 'CoreGui', 'RobloxGui', 'PluginGui', 'CorePackages',
+    }
+    for class_name in class_names:
+        if f'Instance.new("{class_name}")' in resolved_cff:
+            add(f'Instance.new("{class_name}")')
+
+    # --- 3. COMMON INSTANCE METHODS ---
+    instance_methods = {
+        ':GetChildren()': ':GetChildren()',
+        ':GetDescendants()': ':GetDescendants()',
+        ':IsA(': ':IsA("...")',
+        ':Clone()': ':Clone()',
+        ':Destroy()': ':Destroy()',
+        ':Wait()': ':Wait()',
+        ':Play()': ':Play()',
+        ':Stop()': ':Stop()',
+        ':LoadCharacter()': ':LoadCharacter()',
+        ':CreatePath()': ':CreatePath()',
+        ':GetWaypoints()': ':GetWaypoints()',
+        '.Parent =': '.Parent = ...',
+        '.Name =': '.Name = ...',
+        '.ClassName =': '.ClassName = ...',
+        '.Visible =': '.Visible = ...',
+        '.Enabled =': '.Enabled = ...',
+        '.Value =': '.Value = ...',
+        '.Position =': '.Position = ...',
+        '.Size =': '.Size = ...',
+        '.BackgroundColor3 =': '.BackgroundColor3 = ...',
+        '.TextColor3 =': '.TextColor3 = ...',
+        '.Font =': '.Font = ...',
+        '.TextSize =': '.TextSize = ...',
+        '.Transparency =': '.Transparency = ...',
+        '.AnchorPoint =': '.AnchorPoint = ...',
+        '.BackgroundTransparency =': '.BackgroundTransparency = ...',
+        '.BorderSizePixel =': '.BorderSizePixel = ...',
+        '.ZIndex =': '.ZIndex = ...',
+        '.LayoutOrder =': '.LayoutOrder = ...',
+        '.Text =': '.Text = ...',
+        '.Image =': '.Image = ...',
+        '.ImageRect =': '.ImageRect = ...',
+        '.ImageSize =': '.ImageSize = ...',
+        '.TextWrapped =': '.TextWrapped = ...',
+        '.TextScaled =': '.TextScaled = ...',
+        '.FontSize =': '.FontSize = ...',
+        '.FontStyle =': '.FontStyle = ...',
+        '.FontWeight =': '.FontWeight = ...',
+        '.FontName =': '.FontName = ...',
+        '.FontFamily =': '.FontFamily = ...',
+        '.Rotation =': '.Rotation = ...',
+        '.Angle =': '.Angle = ...',
+        '.Direction =': '.Direction = ...',
+        '.Velocity =': '.Velocity = ...',
+        '.Acceleration =': '.Acceleration = ...',
+        '.MaxForce =': '.MaxForce = ...',
+        '.Damping =': '.Damping = ...',
+        '.Friction =': '.Friction = ...',
+        '.Elasticity =': '.Elasticity = ...',
+        '.Density =': '.Density = ...',
+        '.Shape =': '.Shape = ...',
+        '.Texture =': '.Texture = ...',
+        '.ImageColor =': '.ImageColor = ...',
+        '.ImageRect =': '.ImageRect = ...',
+        '.ImageSize =': '.ImageSize = ...',
+        '.TextColor =': '.TextColor = ...',
+        '.TextSize =': '.TextSize = ...',
+        '.TextX =': '.TextX = ...',
+        '.TextY =': '.TextY = ...',
+        '.TextWrap =': '.TextWrap = ...',
+        '.TextScaled =': '.TextScaled = ...',
+    }
+    for pat, rep in instance_methods.items():
+        if pat in resolved_cff:
+            add(rep)
+
+    # --- 4. GET SERVICE WITH PARAMETER ---
+    for m in re.finditer(r':GetService\("([^"]+)"\)', resolved_cff):
+        add(f'game:GetService("{m.group(1)}")')
+    for m in re.finditer(r':WaitForChild\("([^"]+)"\)', resolved_cff):
+        add(f':WaitForChild("{m.group(1)}")')
+    for m in re.finditer(r':FindFirstChild\("([^"]+)"\)', resolved_cff):
+        add(f':FindFirstChild("{m.group(1)}")')
+    for m in re.finditer(r':FindFirstChildOfClass\("([^"]+)"\)', resolved_cff):
+        add(f':FindFirstChildOfClass("{m.group(1)}")')
+    for m in re.finditer(r':FindFirstChildWhichIsA\("([^"]+)"\)', resolved_cff):
+        add(f':FindFirstChildWhichIsA("{m.group(1)}")')
+
+    # --- 5. HTTP REQUESTS ---
+    for m in re.finditer(r'(?:HttpGet|HttpPost)\("(https?://[^"]+)"\)', resolved_cff):
+        add(f':HttpGet("{m.group(1)}")')
+
+    # --- 6. ATTRIBUTES ---
+    for m in re.finditer(r':SetAttribute\("([^"]+)"', resolved_cff):
+        add(f':SetAttribute("{m.group(1)}", ...)')
+    for m in re.finditer(r':GetAttribute\("([^"]+)"\)', resolved_cff):
+        add(f':GetAttribute("{m.group(1)}")')
+
+    # --- 7. REMOTE EVENTS / FUNCTIONS ---
+    for m in re.finditer(r'\.(OnServerEvent|OnClientEvent)\("([^"]+)"\)', resolved_cff):
+        add(f'.{m.group(1)}("{m.group(2)}")')
+    for m in re.finditer(r'\.(InvokeServer|FireServer)\("([^"]+)"\)', resolved_cff):
+        add(f':{m.group(1)}("{m.group(2)}")')
+    for m in re.finditer(r'\.(FireClient|FireAllClients)\(', resolved_cff):
+        add(f':{m.group(1)}(...)')
+
+    # --- 8. REQUIRE ---
+    for m in re.finditer(r'require\("([^"]+)"\)', resolved_cff):
+        add(f'require("{m.group(1)}")')
+
+    # --- 9. ENUM ---
+    for m in re.finditer(r'Enum\.([A-Z]\w+\.[A-Z]\w+)', resolved_cff):
+        add(f'Enum.{m.group(1)}')
+
+    # --- 10. PROPERTY ASSIGNMENT WITH STRINGS ---
+    for m in re.finditer(r'\.(?:[Tt]ext|[Nn]ame)\s*=\s*"([^"]{2,})"', resolved_cff):
+        prop, val = m.group(0).split('=', 1)
+        val = val.strip()
+        if not re.match(r'^"[A-Za-z0-9]{8,}"$', val):
+            add(m.group(0))
+
+    # --- 11. STRING.FORMAT ---
+    for m in re.finditer(r'string\.format\("([^"]{3,})"', resolved_cff):
+        fmt = m.group(1)
+        if '%' in fmt and len(fmt) < 200:
+            add(f'string.format("{fmt}", ...)')
+
+    # --- 12. ERROR/WARN/PRINT ---
+    for m in re.finditer(r'(?:error|warn|assert)\("([^"]{5,})"', resolved_cff):
+        msg = m.group(1)
+        if len(msg) > 10 and not re.match(r'^[A-Za-z0-9]{8,}$', msg):
+            add(m.group(0))
+    for m in re.finditer(r'print\("([^"]{5,})"\)', resolved_cff):
+        msg = m.group(1)
+        if len(msg) > 5 and not re.match(r'^[A-Za-z0-9]{8,}$', msg):
+            add(f'print("{msg}")')
+
+    # --- 13. TWEEN SERVICE ---
+    if resolved_cff.count('TweenService') > 0 and ':Create(' in resolved_cff:
+        add('TweenService:Create(...)')
+    for m in re.finditer(r':TweenPosition\((.*?)\)', resolved_cff):
+        add(':TweenPosition(...)')
+    for m in re.finditer(r':TweenSize\((.*?)\)', resolved_cff):
+        add(':TweenSize(...)')
+    for m in re.finditer(r':TweenRotation\((.*?)\)', resolved_cff):
+        add(':TweenRotation(...)')
+    for m in re.finditer(r':TweenColor\((.*?)\)', resolved_cff):
+        add(':TweenColor(...)')
+
+    # --- 14. DATA STORE ---
+    for m in re.finditer(r':GetDataStore\("([^"]+)"\)', resolved_cff):
+        add(f':GetDataStore("{m.group(1)}")')
+    if ':GetAsync(' in resolved_cff:
+        add(':GetAsync(...)')
+    if ':SetAsync(' in resolved_cff:
+        add(':SetAsync(...)')
+    if ':UpdateAsync(' in resolved_cff:
+        add(':UpdateAsync(...)')
+    if ':GetOrderedDataStore(' in resolved_cff:
+        add(':GetOrderedDataStore(...)')
+
+    # --- 15. PATHFINDING ---
+    if 'PathfindingService' in resolved_cff:
+        add('game:GetService("PathfindingService")')
+    for m in re.finditer(r':ComputeAsync\((.*?)\)', resolved_cff):
+        add(':ComputeAsync(...)')
+    if ':GetWaypoints(' in resolved_cff:
+        add(':GetWaypoints(...)')
+
+    # --- 16. RUN SERVICE ---
+    if 'RunService' in resolved_cff:
+        add('game:GetService("RunService")')
+    for m in re.finditer(r':(BindToRenderStep|UnbindFromRenderStep)\("([^"]+)"', resolved_cff):
+        add(f':{m.group(1)}("{m.group(2)}", ...)')
+    if ':Heartbeat:Connect(' in resolved_cff:
+        add('.Heartbeat:Connect(function(dt)')
+    if ':Stepped:Connect(' in resolved_cff:
+        add('.Stepped:Connect(function(dt)')
+    if ':RenderStepped:Connect(' in resolved_cff:
+        add('.RenderStepped:Connect(function(dt)')
+
+    # --- 17. USER INPUT SERVICE ---
+    if 'UserInputService' in resolved_cff:
+        add('game:GetService("UserInputService")')
+    if 'InputBegan:' in resolved_cff:
+        add('.InputBegan:Connect(function(input, gameProcessed)')
+    if 'InputEnded:' in resolved_cff:
+        add('.InputEnded:Connect(function(input, gameProcessed)')
+
+    # --- 18. CONTEXT ACTION SERVICE ---
+    if 'ContextActionService' in resolved_cff:
+        add('game:GetService("ContextActionService")')
+    for m in re.finditer(r':BindAction\("([^"]+)"', resolved_cff):
+        add(f':BindAction("{m.group(1)}", ...)')
+    if ':UnbindAction(' in resolved_cff:
+        add(':UnbindAction(...)')
+
+    # --- 19. PLAYERS ---
+    if 'Players' in resolved_cff:
+        add('game:GetService("Players")')
+    if '.LocalPlayer' in resolved_cff:
+        add('.LocalPlayer')
+    if '.CharacterAdded:Connect(' in resolved_cff:
+        add('.CharacterAdded:Connect(function(character)')
+    if '.CharacterRemoving:Connect(' in resolved_cff:
+        add('.CharacterRemoving:Connect(function(character)')
+    if '.PlayerAdded:Connect(' in resolved_cff:
+        add('.PlayerAdded:Connect(function(player)')
+    if '.PlayerRemoving:Connect(' in resolved_cff:
+        add('.PlayerRemoving:Connect(function(player)')
+
+    # --- 20. WORKSPACE ---
+    if 'Workspace' in resolved_cff or 'workspace' in resolved_cff:
+        add('game:GetService("Workspace")')
+    if '.ChildAdded:Connect(' in resolved_cff:
+        add('.ChildAdded:Connect(function(child)')
+    if '.ChildRemoved:Connect(' in resolved_cff:
+        add('.ChildRemoved:Connect(function(child)')
+    if '.DescendantAdded:Connect(' in resolved_cff:
+        add('.DescendantAdded:Connect(function(desc)')
+    if '.DescendantRemoved:Connect(' in resolved_cff:
+        add('.DescendantRemoved:Connect(function(desc)')
+    if '.AncestryChanged:Connect(' in resolved_cff:
+        add('.AncestryChanged:Connect(function(child, parent)')
+
+    # --- 21. CHANGED EVENT ---
+    if '.Changed:Connect(' in resolved_cff:
+        add('.Changed:Connect(function(property)')
+    for m in re.finditer(r'GetPropertyChangedSignal\("([^"]+)"\)', resolved_cff):
+        add(f':GetPropertyChangedSignal("{m.group(1)}")')
+
+    # --- 22. SOUND ---
+    if 'SoundService' in resolved_cff:
+        add('game:GetService("SoundService")')
+    for m in re.finditer(r':Play\((.*?)\)', resolved_cff):
+        if ':Play(' not in ['TweenService', 'AnimationTrack']:
+            add(':Play(...)')
+    if ':Stop()' in resolved_cff:
+        add(':Stop()')
+    if ':Pause()' in resolved_cff:
+        add(':Pause()')
+    if ':Resume()' in resolved_cff:
+        add(':Resume()')
+
+    # --- 23. ANIMATION ---
+    if 'Animator' in resolved_cff:
+        add('Animator')
+    if ':LoadAnimation(' in resolved_cff:
+        add(':LoadAnimation(...)')
+    if '.AnimationTrack' in resolved_cff:
+        add('.AnimationTrack')
+
+    # --- 24. UI ---
+    ui_components = {'UIGradient', 'UIPadding', 'UICorner', 'UIStroke', 'UISizeConstraint', 'UIListLayout', 'UIGridLayout', 'UIPageLayout', 'UITableLayout'}
+    for comp in ui_components:
+        if comp in resolved_cff:
+            add(comp)
+
+    # --- 25. LIGHTING ---
+    if 'Lighting' in resolved_cff:
+        add('game:GetService("Lighting")')
+
+    # --- 26. HTTP ---
+    if 'HttpService' in resolved_cff:
+        add('game:GetService("HttpService")')
+    for m in re.finditer(r'\.(RequestAsync|JSONDecode|JSONEncode)\(', resolved_cff):
+        add(f':{m.group(1)}(...)')
+
+    # --- 27. BIT32 / BIT ---
+    bit_functions = ['bit32.bxor', 'bit32.band', 'bit32.bor', 'bit32.bnot', 'bit32.lshift', 'bit32.rshift',
+                     'bit.bxor', 'bit.band', 'bit.bor', 'bit.bnot', 'bit.lshift', 'bit.rshift']
+    for func in bit_functions:
+        if func in resolved_cff:
+            add(func + '(...)')
+
+    # --- 28. COMMON STRING FUNCTIONS ---
+    string_funcs = ['string.gsub', 'string.sub', 'string.find', 'string.match', 'string.format', 'string.rep', 'string.len', 'string.byte', 'string.char', 'string.lower', 'string.upper', 'string.reverse', 'string.gmatch']
+    for func in string_funcs:
+        if func in resolved_cff:
+            add(func + '(...)')
+
+    # --- 29. TABLE FUNCTIONS ---
+    table_funcs = ['table.insert', 'table.remove', 'table.sort', 'table.concat', 'table.unpack', 'table.pack']
+    for func in table_funcs:
+        if func in resolved_cff:
+            add(func + '(...)')
+
+    # --- 30. COROUTINE ---
+    coro_funcs = ['coroutine.create', 'coroutine.resume', 'coroutine.yield', 'coroutine.wrap']
+    for func in coro_funcs:
+        if func in resolved_cff:
+            add(func + '(...)')
+
+    # --- 31. MATH ---
+    math_funcs = ['math.random', 'math.floor', 'math.ceil', 'math.abs', 'math.sin', 'math.cos', 'math.tan', 'math.atan', 'math.sqrt', 'math.pow', 'math.log', 'math.exp', 'math.min', 'math.max', 'math.modf', 'math.pi', 'math.huge']
+    for func in math_funcs:
+        if func in resolved_cff:
+            add(func + '(...)')
+
+    # --- 32. OS ---
+    os_funcs = ['os.time', 'os.date', 'os.clock', 'os.difftime']
+    for func in os_funcs:
+        if func in resolved_cff:
+            add(func + '(...)')
+
+    # --- 33. DEBUG ---
+    debug_funcs = ['debug.getinfo', 'debug.getupvalue', 'debug.setupvalue', 'debug.getlocal', 'debug.setlocal', 'debug.traceback', 'debug.getmetatable', 'debug.setmetatable']
+    for func in debug_funcs:
+        if func in resolved_cff:
+            add(func + '(...)')
+
+    # --- 34. LOADSTRING / ENVIRONMENT ---
+    if 'loadstring(' in resolved_cff:
+        add('loadstring(...)')
+    if 'getfenv(' in resolved_cff:
+        add('getfenv(...)')
+    if 'setfenv(' in resolved_cff:
+        add('setfenv(...)')
+    if 'getgenv(' in resolved_cff:
+        add('getgenv(...)')
+    if 'setgenv(' in resolved_cff:
+        add('setgenv(...)')
+    if 'getrenv(' in resolved_cff:
+        add('getrenv(...)')
+    if 'setrenv(' in resolved_cff:
+        add('setrenv(...)')
+
+    # --- 35. RAWSET / RAWGET ---
+    if 'rawget(' in resolved_cff:
+        add('rawget(...)')
+    if 'rawset(' in resolved_cff:
+        add('rawset(...)')
+
+    # --- 36. GETMETATABLE / SETMETATABLE ---
+    if 'getmetatable(' in resolved_cff:
+        add('getmetatable(...)')
+    if 'setmetatable(' in resolved_cff:
+        add('setmetatable(...)')
+
+    # --- 37. ISCCLOSURE / ISLUAUFUNCTION ---
+    if 'iscclosure(' in resolved_cff:
+        add('iscclosure(...)')
+    if 'isluaufunction(' in resolved_cff:
+        add('isluaufunction(...)')
+
+    # --- 38. HOOKFUNCTION / NEWCCLOSURE ---
+    if 'hookfunction(' in resolved_cff:
+        add('hookfunction(...)')
+    if 'newcclosure(' in resolved_cff:
+        add('newcclosure(...)')
+
+    # --- 39. SYNAPSE / EXECUTOR APIS ---
+    executor_apis = ['syn', 'protect_gui', 'rconsoleprint', 'rconsoleinfo', 'rconsolewarn', 'rconsoleclear', 'rconsoleinput']
+    for api in executor_apis:
+        if api in resolved_cff:
+            add(api + '(...)')
+
+    # --- 40. TASK LIBRARY ---
+    task_funcs = ['task.wait', 'task.spawn', 'task.delay', 'task.defer', 'task.sync', 'task.desync']
+    for func in task_funcs:
+        if func in resolved_cff:
+            add(func + '(...)')
+
+    # --- 41. ASSET IDS ---
+    for m in re.finditer(r'"(\d{8,12})"', resolved_cff):
+        add(f'-- Asset ID: {m.group(1)}')
+
+    # --- 42. RBXASSETID ---
+    for m in re.finditer(r'rbxassetid://(\d+)', resolved_cff):
+        add(f'-- rbxassetid://{m.group(1)}')
+    # --- 43. PLACE ID / GROUP ID / DATABASE ID ---
+    for m in re.finditer(r'(\d{6,10})', resolved_cff):
+        # Heuristic: if it's a long number, it might be an ID
+        pass  # we don't add raw numbers to avoid noise; we already have asset IDs and rbxassetid
+
+    # --- 44. COLON METHODS (generic) ---
+    colon_methods = [
+        'GetChildren', 'GetDescendants', 'GetAttribute', 'SetAttribute',
+        'AddTag', 'HasTag', 'GetTags', 'ClearAllChildren',
+        'GetBoundingBox', 'GetPivot', 'SetPivot', 'AlignPosition',
+        'TweenPosition', 'TweenSize', 'TweenRotation', 'TweenColor',
+        'GetState', 'SetState', 'GetNetworkOwner', 'SetNetworkOwner',
+        'GetPlayerFromCharacter', 'GetCharacterFromPlayer',
+        'GetMouseLocation', 'GetCamera', 'SetCamera',
+        'GetPartBounds', 'GetPartsInPart', 'GetPartsInBox', 'GetPartsInSphere',
+        'FireAllClients', 'FireClient', 'FireAllServers', 'Raycast',
+        'Play', 'Stop', 'Pause', 'Resume', 'LoadCharacter',
+        'GetDataStore', 'SetAsync', 'GetAsync', 'UpdateAsync',
+        'ComputeAsync', 'GetWaypoints', 'CreatePath',
+        'BindToRenderStep', 'UnbindFromRenderStep',
+        'GetFullName', 'GetActor', 'IsDescendantOf', 'GetDebugId',
+        'ChildAdded', 'ChildRemoved', 'DescendantAdded', 'DescendantRemoved',
+        'AncestryChanged', 'Changed',
+    ]
+    for method in colon_methods:
+        if f':{method}(' in resolved_cff or f'.{method}:' in resolved_cff:
+            add(f':{method}(...)')
+
+    # --- 45. ADDITIONAL: CONNECT PATTERNS ---
+    if '.Connect(' in resolved_cff:
+        add('.Connect(...)')
+
+    # --- 46. ADDITIONAL: WAIT ---
+    if ':Wait()' in resolved_cff:
+        add(':Wait()')
+
+    return code_lines
 
     @staticmethod
     def _extract_code_from_cff(resolved_cff: str) -> List[str]:
@@ -3069,7 +3956,7 @@ def _health():
     return "Bot is running."
 
 def _run_keep_alive():
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.environ.get("PORT", 8080))
     keep_alive_app.run(host="0.0.0.0", port=port)
 
 def start_keep_alive():
@@ -3248,17 +4135,8 @@ async def help_cmd(ctx: commands.Context):
 
 
 if __name__ == "__main__":
-    # v9 fix: always bind the keep-alive port first, regardless of whether
-    # TOKEN is present. Previously start_keep_alive() only ran inside the
-    # `else` branch, so a missing/misread TOKEN env var caused the process
-    # to print a warning and exit immediately -- no port ever got bound,
-    # and Render's port scanner times out with "No open ports detected"
-    # (which looks like a network/deploy issue, but the real cause is the
-    # missing token being swallowed silently).
-    start_keep_alive()
     if not TOKEN:
-        print("[!] DISCORD_TOKEN (or DISCORD_BOT_TOKEN) env var is not set or empty. "
-              "Bot will not connect to Discord, but the keep-alive port is up so "
-              "Render won't kill the service -- fix the env var and redeploy.")
+        print("[!] Set DISCORD_TOKEN env var before running.")
     else:
+        start_keep_alive()
         bot.run(TOKEN)
