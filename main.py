@@ -3248,7 +3248,17 @@ async def help_cmd(ctx: commands.Context):
 
 
 if __name__ == "__main__":
+    # v9 fix: always bind the keep-alive port first, regardless of whether
+    # TOKEN is present. Previously start_keep_alive() only ran inside the
+    # `else` branch, so a missing/misread TOKEN env var caused the process
+    # to print a warning and exit immediately -- no port ever got bound,
+    # and Render's port scanner times out with "No open ports detected"
+    # (which looks like a network/deploy issue, but the real cause is the
+    # missing token being swallowed silently).
+    start_keep_alive()
     if not TOKEN:
-        print("[!] Set DISCORD_TOKEN env var before running.")
+        print("[!] DISCORD_TOKEN (or DISCORD_BOT_TOKEN) env var is not set or empty. "
+              "Bot will not connect to Discord, but the keep-alive port is up so "
+              "Render won't kill the service -- fix the env var and redeploy.")
     else:
         bot.run(TOKEN)
