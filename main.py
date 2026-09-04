@@ -3251,5 +3251,4 @@ if __name__ == "__main__":
     if not TOKEN:
         print("[!] Set DISCORD_TOKEN env var before running.")
     else:
-        start_keep_alive()
         bot.run(TOKEN)
