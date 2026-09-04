@@ -2305,10 +2305,11 @@ if len(s) >= 4 and len(s) <= 120:
         add(f'-- VM string literal: "{s}"')
 
                 # Messages / display text (contains spaces or special chars)
-                if any(c in s for c in [' ', '!', '?', '.', ':', '/', '\\', '%']) and not s.startswith('end'):
+            if any(c in s for c in [' ', '!', '?', '.', ':', '/', '\\', '%']) and not s.startswith('end'):
                     # Skip code-like strings (VM internal operations)
                     if re.match(r'^[a-z]=', s) or re.match(r'^[a-z][A-Z]', s):
                         continue
+
                     # Skip strings that look like VM bytecode fragments
                     if '=' in s and any(kw in s for kw in ['q[o]', 'q[S]', 'p[r[', 'q=p[r',
                                                           'q<', 'q and', 'q or', 'q=U',
