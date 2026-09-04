@@ -762,89 +762,89 @@ class LuaObfuscatorFeribDeobfuscator:
 
         return code
 
-@staticmethod
-def _extract_strings_static(code: str, mode: str = "simple") -> List[str]:
-    strings = set()
+    @staticmethod
+    def _extract_strings_static(code: str, mode: str = "simple") -> List[str]:
+        strings = set()
     
-    # 1. String literal "..." và '...'
-    str_literals = re.findall(r'''(["'])((?:(?!\1).)*)\1''', code, re.DOTALL)
-    for _, content in str_literals:
-        if content:
-            strings.add(content)
+        # 1. String literal "..." và '...'
+        str_literals = re.findall(r'''(["'])((?:(?!\1).)*)\1''', code, re.DOTALL)
+        for _, content in str_literals:
+            if content:
+                strings.add(content)
     
-    # 2. Long bracket strings
-    long_strings = re.findall(r'\[=*\[(.*?)\]=*\]', code, re.DOTALL)
-    for s in long_strings:
-        if s:
-            strings.add(s.strip())
+        # 2. Long bracket strings
+        long_strings = re.findall(r'\[=*\[(.*?)\]=*\]', code, re.DOTALL)
+        for s in long_strings:
+            if s:
+                strings.add(s.strip())
     
-    # 3. Nếu mode == "all" → thêm tên biến/hàm
-    if mode == "all":
-        identifiers = re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\b', code)
-        keywords = {"and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while"}
-        for ident in identifiers:
-            if len(ident) > 2 and ident not in keywords:
-                strings.add(ident)
+        # 3. Nếu mode == "all" → thêm tên biến/hàm
+        if mode == "all":
+            identifiers = re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\b', code)
+            keywords = {"and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while"}
+            for ident in identifiers:
+                if len(ident) > 2 and ident not in keywords:
+                    strings.add(ident)
     
-    # 4. API names (mở rộng)
-    api_names = {
-        "print", "warn", "error", "tostring", "tonumber", "type", "next", "pairs", "ipairs", "select", "unpack",
-        "game", "workspace", "script", "Instance", "new", "Clone", "Destroy", "FindFirstChild", "GetService",
-        "WaitForChild", "GetChildren", "GetDescendants", "AddTag", "HasTag", "GetTags",
-        "TweenService", "TweenInfo", "Create", "Play", "Cancel", "Pause", "Resume",
-        "Players", "LocalPlayer", "PlayerGui", "Backpack", "StarterGui", "StarterPack",
-        "Character", "Humanoid", "RootPart", "Torso", "Head", "LeftArm", "RightArm", "LeftLeg", "RightLeg",
-        "CFrame", "Vector3", "Color3", "UDim2", "Rect", "Region3", "BrickColor",
-        "RunService", "Heartbeat", "Stepped", "RenderStepped", "BindToRenderStep", "UnbindFromRenderStep",
-        "UserInputService", "InputBegan", "InputEnded", "InputChanged",
-        "ContextActionService", "BindAction", "UnbindAction",
-        "HttpService", "GetAsync", "PostAsync", "RequestAsync", "JSONDecode", "JSONEncode",
-        "DataStoreService", "GetDataStore", "SetAsync", "GetAsync", "UpdateAsync",
-        "ReplicatedStorage", "ReplicatedFirst", "ServerScriptService", "ServerStorage",
-        "SoundService", "Lighting", "Debris", "Delay", "Spawn", "wait", "task.wait",
-        "HttpGet", "HttpPost", "setreadonly", "readfile", "writefile",
-        "getgenv", "setgenv", "getfenv", "setfenv", "loadstring",
-        "pcall", "xpcall", "require", "spawn", "delay",
-        "FireServer", "InvokeServer", "OnServerEvent", "OnClientEvent",
-        "Connect", "Wait", "ChildAdded", "ChildRemoved"
-    }
-    for api in api_names:
-        if re.search(rf'\b{api}\b', code):
-            strings.add(api)
+        # 4. API names (mở rộng)
+        api_names = {
+            "print", "warn", "error", "tostring", "tonumber", "type", "next", "pairs", "ipairs", "select", "unpack",
+            "game", "workspace", "script", "Instance", "new", "Clone", "Destroy", "FindFirstChild", "GetService",
+            "WaitForChild", "GetChildren", "GetDescendants", "AddTag", "HasTag", "GetTags",
+            "TweenService", "TweenInfo", "Create", "Play", "Cancel", "Pause", "Resume",
+            "Players", "LocalPlayer", "PlayerGui", "Backpack", "StarterGui", "StarterPack",
+            "Character", "Humanoid", "RootPart", "Torso", "Head", "LeftArm", "RightArm", "LeftLeg", "RightLeg",
+            "CFrame", "Vector3", "Color3", "UDim2", "Rect", "Region3", "BrickColor",
+            "RunService", "Heartbeat", "Stepped", "RenderStepped", "BindToRenderStep", "UnbindFromRenderStep",
+            "UserInputService", "InputBegan", "InputEnded", "InputChanged",
+            "ContextActionService", "BindAction", "UnbindAction",
+            "HttpService", "GetAsync", "PostAsync", "RequestAsync", "JSONDecode", "JSONEncode",
+            "DataStoreService", "GetDataStore", "SetAsync", "GetAsync", "UpdateAsync",
+            "ReplicatedStorage", "ReplicatedFirst", "ServerScriptService", "ServerStorage",
+            "SoundService", "Lighting", "Debris", "Delay", "Spawn", "wait", "task.wait",
+            "HttpGet", "HttpPost", "setreadonly", "readfile", "writefile",
+            "getgenv", "setgenv", "getfenv", "setfenv", "loadstring",
+            "pcall", "xpcall", "require", "spawn", "delay",
+            "FireServer", "InvokeServer", "OnServerEvent", "OnClientEvent",
+            "Connect", "Wait", "ChildAdded", "ChildRemoved"
+        }
+        for api in api_names:
+            if re.search(rf'\b{api}\b', code):
+                strings.add(api)
     
-    # 5. Table keys
-    table_keys = re.findall(r'\[[\'"]?([A-Za-z_][A-Za-z0-9_]*)[\'"]?\]', code)
-    for key in table_keys:
-        if key:
-            strings.add(key)
+        # 5. Table keys
+        table_keys = re.findall(r'\[[\'"]?([A-Za-z_][A-Za-z0-9_]*)[\'"]?\]', code)
+        for key in table_keys:
+            if key:
+                strings.add(key)
     
-    # 6. loadstring
-    loadstring_calls = re.findall(r'loadstring\s*\(\s*["\']([^"\']+)["\']', code)
-    for s in loadstring_calls:
-        if s:
-            strings.add(s)
+        # 6. loadstring
+        loadstring_calls = re.findall(r'loadstring\s*\(\s*["\']([^"\']+)["\']', code)
+        for s in loadstring_calls:
+            if s:
+                strings.add(s)
     
-    # 7. print/warn
-    print_calls = re.findall(r'(?:print|warn)\s*\(\s*["\']([^"\']+)["\']', code)
-    for s in print_calls:
-        if s:
-            strings.add(s)
+        # 7. print/warn
+        print_calls = re.findall(r'(?:print|warn)\s*\(\s*["\']([^"\']+)["\']', code)
+        for s in print_calls:
+            if s:
+                strings.add(s)
     
-    # 8. error
-    error_calls = re.findall(r'error\s*\(\s*["\']([^"\']+)["\']', code)
-    for s in error_calls:
-        if s:
-            strings.add(s)
+        # 8. error
+        error_calls = re.findall(r'error\s*\(\s*["\']([^"\']+)["\']', code)
+        for s in error_calls:
+            if s:
+                strings.add(s)
     
-    # 9. Lọc theo quy tắc cũ (giữ tương thích)
-    if mode == "simple":
-        result = []
-        for s in strings:
-            if s in api_names or (len(s) > 4 and s[0].islower()):
-                result.append(s)
-        return list(set(result))
+        # 9. Lọc theo quy tắc cũ (giữ tương thích)
+        if mode == "simple":
+            result = []
+            for s in strings:
+                if s in api_names or (len(s) > 4 and s[0].islower()):
+                    result.append(s)
+            return list(set(result))
     
-    return list(strings)
+        return list(strings)
 
     @staticmethod
     def deobfuscate(code: str, engine: LuaEngine, verbose: bool) -> Optional[Tuple[str, dict]]:
@@ -2417,14 +2417,14 @@ def _mine_opcode_strings(decoded_cff: str) -> List[str]:
     # ============================================================
     # Phase 5: Source reconstruction (v5.2 UPGRADED)
     # ============================================================
-COLON_METHODS = frozenset({
-    # === ROBLOX CORE ===
+    COLON_METHODS = frozenset({
+        # === ROBLOX CORE ===
     'GetService', 'WaitForChild', 'FindFirstChild', 'FindFirstChildOfClass',
     'FindFirstChildWhichIsA', 'IsA', 'Clone', 'Destroy', 'Connect',
     'Disconnect', 'InvokeServer', 'FireServer', 'Fire', 'OnServerEvent',
     'OnClientEvent', 'HttpGet', 'HttpPost', 'Wait', 'GetPropertyChangedSignal',
     
-    # === INSTANCE METHODS ===
+        # === INSTANCE METHODS ===
     'GetChildren', 'GetDescendants', 'GetAttribute', 'SetAttribute',
     'AddTag', 'HasTag', 'GetTags', 'ClearAllChildren',
     'GetBoundingBox', 'GetPivot', 'SetPivot', 'AlignPosition',
@@ -2442,7 +2442,7 @@ COLON_METHODS = frozenset({
     'GetPivot', 'SetPivot', 'AlignOrientation', 'GetBoundingBox',
     'GetPartBoundsInBox', 'GetPartBoundsInSphere', 'GetPartBoundsInRegion',
     
-    # === HUMANOID METHODS ===
+        # === HUMANOID METHODS ===
     'LoadCharacter', 'MoveTo', 'WalkTo', 'Jump', 'Sit', 'Stand',
     'GetState', 'SetState', 'GetHealth', 'SetHealth',
     'GetMaxHealth', 'SetMaxHealth', 'GetWalkSpeed', 'SetWalkSpeed',
@@ -2454,7 +2454,7 @@ COLON_METHODS = frozenset({
     'BreakJointsOnDeath', 'GetDisplayName', 'GetAccountAge',
     'GetMembershipType', 'GetVerified', 'IsOnline',
     
-    # === TWEEN SERVICE ===
+        # === TWEEN SERVICE ===
     'Create', 'Play', 'Pause', 'Resume', 'Cancel', 'Stop',
     'GetTweenInfo', 'SetTweenInfo', 'GetPlaybackState',
     'GetTime', 'SetTime', 'GetSpeed', 'SetSpeed',
@@ -2462,44 +2462,44 @@ COLON_METHODS = frozenset({
     'SetEasingDirection', 'GetRepeatCount', 'SetRepeatCount',
     'GetReverses', 'SetReverses', 'GetDelayTime', 'SetDelayTime',
     
-    # === DATASTORE METHODS ===
+        # === DATASTORE METHODS ===
     'GetAsync', 'SetAsync', 'UpdateAsync', 'GetDataStore',
     'GetOrderedDataStore', 'GetDataStoreList', 'RemoveAsync',
     'GetDataStoreStats', 'GetDataStoreHistory',
     
-    # === PATHFINDING ===
+        # === PATHFINDING ===
     'CreatePath', 'GetWaypoints', 'GetPathLength', 'GetPathTime',
     'GetBlockedWaypoints', 'GetWaypointPosition', 'GetWaypointInfo',
     'ComputeAsync', 'GetPathStatus', 'GetPathError',
     
-    # === RUN SERVICE ===
+        # === RUN SERVICE ===
     'BindToRenderStep', 'UnbindFromRenderStep', 'GetRenderStep',
     'GetStep', 'GetHeartbeat', 'GetStepped',
     
-    # === HTTP SERVICE ===
+        # === HTTP SERVICE ===
     'RequestAsync', 'JSONDecode', 'JSONEncode', 'GetAsync', 'PostAsync',
     'DeleteAsync', 'HeadAsync', 'PatchAsync', 'PutAsync',
     'GetRequestAsync', 'PostRequestAsync',
     
-    # === PLAYERS ===
+        # === PLAYERS ===
     'GetPlayers', 'GetPlayer', 'GetPlayerByUserId', 'GetPlayerByCharacter',
     'GetPlayerFromCharacter', 'GetCharacterFromPlayer',
     'GetPlayerGui', 'GetBackpack', 'GetStarterGui', 'GetStarterPack',
     'GetCharacter', 'LoadCharacter', 'GetMouseLocation',
     'GetCamera', 'SetCamera', 'GetCameraFocus', 'SetCameraFocus',
     
-    # === SOUND ===
+        # === SOUND ===
     'Play', 'Stop', 'Pause', 'Resume', 'GetTime', 'SetTime',
     'GetVolume', 'SetVolume', 'GetPitch', 'SetPitch',
     'GetPlaybackLoudness', 'GetSoundId', 'SetSoundId',
     'GetLooped', 'SetLooped', 'GetPlaying', 'GetPlaybackPosition',
     
-    # === ANIMATION ===
+        # === ANIMATION ===
     'LoadAnimation', 'Play', 'Stop', 'Pause', 'Resume',
     'GetKeyframeSequence', 'GetAnimationTrack', 'GetPriority',
     'GetSpeed', 'SetSpeed', 'GetTime', 'SetTime',
     
-    # === UI ===
+        # === UI ===
     'SetAttribute', 'GetAttribute', 'GetAttributes', 'ClearAttributes',
     'GetPosition', 'SetPosition', 'GetSize', 'SetSize',
     'GetRotation', 'SetRotation', 'GetTransparency', 'SetTransparency',
@@ -2510,20 +2510,20 @@ COLON_METHODS = frozenset({
     'GetVisible', 'SetVisible', 'GetEnabled', 'SetEnabled',
     'GetActive', 'SetActive', 'GetSelected', 'SetSelected',
     
-    # === LIGHTING ===
+        # === LIGHTING ===
     'GetAmbient', 'SetAmbient', 'GetBrightness', 'SetBrightness',
     'GetColorShiftTop', 'SetColorShiftTop', 'GetColorShiftBottom',
     'SetColorShiftBottom', 'GetOutdoorAmbient', 'SetOutdoorAmbient',
     'GetShadowSoftness', 'SetShadowSoftness', 'GetTechnology',
     'SetTechnology', 'GetGlobalShadows', 'SetGlobalShadows',
     
-    # === WORKSPACE ===
+        # === WORKSPACE ===
     'GetTerrain', 'GetPartsInBox', 'GetPartsInSphere', 'GetPartsInRegion',
     'GetPartBoundsInBox', 'GetPartBoundsInSphere', 'GetPartBoundsInRegion',
     'Raycast', 'GetRaycast', 'SetRaycast', 'GetPhysicsSettings',
     'SetPhysicsSettings', 'GetGravity', 'SetGravity',
     
-    # === TWEEN SERVICE ===
+        # === TWEEN SERVICE ===
     'Create', 'Play', 'Pause', 'Resume', 'Cancel', 'Stop',
     'GetTweenInfo', 'SetTweenInfo', 'GetPlaybackState',
     'GetTime', 'SetTime', 'GetSpeed', 'SetSpeed',
@@ -2531,35 +2531,35 @@ COLON_METHODS = frozenset({
     'SetEasingDirection', 'GetRepeatCount', 'SetRepeatCount',
     'GetReverses', 'SetReverses', 'GetDelayTime', 'SetDelayTime',
     
-    # === RUN SERVICE ===
+        # === RUN SERVICE ===
     'BindToRenderStep', 'UnbindFromRenderStep', 'GetRenderStep',
     'GetStep', 'GetHeartbeat', 'GetStepped',
     
-    # === SCRIPT CONTEXT ===
+        # === SCRIPT CONTEXT ===
     'GetScripts', 'GetModuleScripts', 'GetLocalScripts',
     'GetServerScripts', 'GetClientScripts', 'GetCoreScripts',
     
-    # === MARKETPLACE ===
+        # === MARKETPLACE ===
     'GetProductInfo', 'GetProductId', 'GetProductPrice',
     'GetProductDescription', 'GetProductTitle', 'GetProductIcon',
     'GetProductImage', 'GetProductVideo', 'GetProductScreenshots',
     
-    # === COLLECTION SERVICE ===
+        # === COLLECTION SERVICE ===
     'GetCollection', 'GetCollections', 'GetCollectionTags',
     'AddTag', 'HasTag', 'GetTags', 'ClearAllChildren',
     
-    # === TEXT SERVICE ===
+        # === TEXT SERVICE ===
     'GetTextSize', 'GetTextWidth', 'GetTextHeight',
     'GetTextBoundingBox', 'GetTextWrap', 'GetTextAlignment',
     
-    # === SOUND SERVICE ===
+        # === SOUND SERVICE ===
     'GetSound', 'GetSoundId', 'GetSoundName', 'GetSoundVolume',
     'GetSoundPitch', 'GetSoundLooped', 'GetSoundPlaying',
     
-    # === HTTP RBX API SERVICE ===
+        # === HTTP RBX API SERVICE ===
     'GetAsync', 'PostAsync', 'DeleteAsync', 'HeadAsync',
     'PatchAsync', 'PutAsync', 'GetRequestAsync', 'PostRequestAsync',
-})
+    })
 
     @staticmethod
     def _clean_chain(chain: str, service_names: set, last_service_var: str = None) -> str:
