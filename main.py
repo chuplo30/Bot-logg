@@ -106,7 +106,7 @@ local function deep_stub()
     })
 end
 
-for _,g in ipairs({"game","workspace","Instance","Enum","Players","ReplicatedStorage","RunService","TweenService","HttpService","UDim2","Color3","Vector3","CFrame","task","Vector2","UserInputService","Lighting","Debris","StarterGui","StarterPlayer","StarterPack","Teams","Chat","CollectionService","PathfindingService","SoundService","TextService","GuiService","UserSettings","CoreGui","Rect","UDim","Font","NumberSequence","ColorSequence","NumberRange","TweenInfo","RaycastParams","Material","UGCValidationService","MarketplaceService","script","shared","_G","ServerStorage","ServerScriptService","ReplicatedFirst","DataStoreService","MessagingService","BadgeService","GamePassService","InsertService","AssetService","ContentProvider","ContextActionService","LocalizationService","PhysicsService","VoiceChatService","ProximityPromptService","SocialService","TeleportService","AnalyticsService","MemoryStoreService","TextChatService","VRService","GroupService","FriendService","GamepadService","Stats","LogService","ScriptContext","SelectionService","CustomAvatarService","AvatarEditorService","PolicyService","ProcessInstancePhysicsService","HapticService","PluginManager","ChangeHistoryService","TestService","NotificationService","ExperienceNotificationService","VirtualInputManager","VirtualUser","BrickColor","Region3","Ray","Random","PhysicalProperties","OverlapParams","RaycastResult","Axes","Faces","PathWaypoint","DockWidgetPluginGuiInfo","Camera","Terrain","typeof","wait","spawn","delay","tick","warn","elapsedTime","settings","version","Drawing"}) do
+for _,g in ipairs({"task","game","Instance","TweenService","UDim2","Color3","Vector3","Vector2","CFrame","Enum","workspace","HttpService","Players","ReplicatedStorage","RunService","UserInputService","Lighting","Debris","StarterGui","StarterPlayer","StarterPack","Teams","Chat","CollectionService","PathfindingService","SoundService","TextService","GuiService","UserSettings","CoreGui","Rect","UDim","Font","NumberSequence","ColorSequence","NumberRange","TweenInfo","RaycastParams","Material","UGCValidationService","MarketplaceService"}) do
     _G[g] = deep_stub()
 end
 
@@ -545,6 +545,7 @@ class IronBrewDeobfuscator:
         lines.append("")
         lines.append("-- Full deobfuscation requires VM execution (lupa)")
         return "\n".join(lines), {"method": "string extraction", "strings": len(strings)}
+
     @staticmethod
     def _extract_strings(code: str, mode: str = "all") -> List[str]:
         strings = set()
@@ -607,6 +608,10 @@ class IronBrewDeobfuscator:
                 strings.add(s)
         
         return list(strings)
+
+class WANDeobfuscator:
+    """WAN OBFUSCATE / WAN OBFUSCATOR: byte table + XOR + VM."""
+
 
 class WANDeobfuscator:
     """WAN OBFUSCATE / WAN OBFUSCATOR: byte table + XOR + VM."""
@@ -762,90 +767,89 @@ class LuaObfuscatorFeribDeobfuscator:
 
         return code
 
-@staticmethod
-def _extract_strings_static(code: str, mode: str = "simple") -> List[str]:
-    strings = set()
+    @staticmethod
+    def _extract_strings_static(code: str, mode: str = "simple") -> List[str]:
+        strings = set()
     
-    # 1. String literal "..." và '...'
-    str_literals = re.findall(r'''(["'])((?:(?!\1).)*)\1''', code, re.DOTALL)
-    for _, content in str_literals:
-        if content:
-            strings.add(content)
+        # 1. String literal "..." và '...'
+        str_literals = re.findall(r'''(["'])((?:(?!\1).)*)\1''', code, re.DOTALL)
+        for _, content in str_literals:
+            if content:
+                strings.add(content)
     
-    # 2. Long bracket strings
-    long_strings = re.findall(r'\[=*\[(.*?)\]=*\]', code, re.DOTALL)
-    for s in long_strings:
-        if s:
-            strings.add(s.strip())
+        # 2. Long bracket strings
+        long_strings = re.findall(r'\[=*\[(.*?)\]=*\]', code, re.DOTALL)
+        for s in long_strings:
+            if s:
+                strings.add(s.strip())
     
-    # 3. Nếu mode == "all" → thêm tên biến/hàm
-    if mode == "all":
-        identifiers = re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\b', code)
-        keywords = {"and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while"}
-        for ident in identifiers:
-            if len(ident) > 2 and ident not in keywords:
-                strings.add(ident)
+        # 3. Nếu mode == "all" → thêm tên biến/hàm
+        if mode == "all":
+            identifiers = re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\b', code)
+            keywords = {"and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while"}
+            for ident in identifiers:
+                if len(ident) > 2 and ident not in keywords:
+                    strings.add(ident)
     
-    # 4. API names (mở rộng)
-    api_names = {
-        "print", "warn", "error", "tostring", "tonumber", "type", "next", "pairs", "ipairs", "select", "unpack",
-        "game", "workspace", "script", "Instance", "new", "Clone", "Destroy", "FindFirstChild", "GetService",
-        "WaitForChild", "GetChildren", "GetDescendants", "AddTag", "HasTag", "GetTags",
-        "TweenService", "TweenInfo", "Create", "Play", "Cancel", "Pause", "Resume",
-        "Players", "LocalPlayer", "PlayerGui", "Backpack", "StarterGui", "StarterPack",
-        "Character", "Humanoid", "RootPart", "Torso", "Head", "LeftArm", "RightArm", "LeftLeg", "RightLeg",
-        "CFrame", "Vector3", "Color3", "UDim2", "Rect", "Region3", "BrickColor",
-        "RunService", "Heartbeat", "Stepped", "RenderStepped", "BindToRenderStep", "UnbindFromRenderStep",
-        "UserInputService", "InputBegan", "InputEnded", "InputChanged",
-        "ContextActionService", "BindAction", "UnbindAction",
-        "HttpService", "GetAsync", "PostAsync", "RequestAsync", "JSONDecode", "JSONEncode",
-        "DataStoreService", "GetDataStore", "SetAsync", "GetAsync", "UpdateAsync",
-        "ReplicatedStorage", "ReplicatedFirst", "ServerScriptService", "ServerStorage",
-        "SoundService", "Lighting", "Debris", "Delay", "Spawn", "wait", "task.wait",
-        "HttpGet", "HttpPost", "setreadonly", "readfile", "writefile",
-        "getgenv", "setgenv", "getfenv", "setfenv", "loadstring",
-        "pcall", "xpcall", "require", "spawn", "delay",
-        "FireServer", "InvokeServer", "OnServerEvent", "OnClientEvent",
-        "Connect", "Wait", "ChildAdded", "ChildRemoved"
-    }
-    for api in api_names:
-        if re.search(rf'\b{api}\b', code):
-            strings.add(api)
+        # 4. API names (mở rộng)
+        api_names = {
+            "print", "warn", "error", "tostring", "tonumber", "type", "next", "pairs", "ipairs", "select", "unpack",
+            "game", "workspace", "script", "Instance", "new", "Clone", "Destroy", "FindFirstChild", "GetService",
+            "WaitForChild", "GetChildren", "GetDescendants", "AddTag", "HasTag", "GetTags",
+            "TweenService", "TweenInfo", "Create", "Play", "Cancel", "Pause", "Resume",
+            "Players", "LocalPlayer", "PlayerGui", "Backpack", "StarterGui", "StarterPack",
+            "Character", "Humanoid", "RootPart", "Torso", "Head", "LeftArm", "RightArm", "LeftLeg", "RightLeg",
+            "CFrame", "Vector3", "Color3", "UDim2", "Rect", "Region3", "BrickColor",
+            "RunService", "Heartbeat", "Stepped", "RenderStepped", "BindToRenderStep", "UnbindFromRenderStep",
+            "UserInputService", "InputBegan", "InputEnded", "InputChanged",
+            "ContextActionService", "BindAction", "UnbindAction",
+            "HttpService", "GetAsync", "PostAsync", "RequestAsync", "JSONDecode", "JSONEncode",
+            "DataStoreService", "GetDataStore", "SetAsync", "GetAsync", "UpdateAsync",
+            "ReplicatedStorage", "ReplicatedFirst", "ServerScriptService", "ServerStorage",
+            "SoundService", "Lighting", "Debris", "Delay", "Spawn", "wait", "task.wait",
+            "HttpGet", "HttpPost", "setreadonly", "readfile", "writefile",
+            "getgenv", "setgenv", "getfenv", "setfenv", "loadstring",
+            "pcall", "xpcall", "require", "spawn", "delay",
+            "FireServer", "InvokeServer", "OnServerEvent", "OnClientEvent",
+            "Connect", "Wait", "ChildAdded", "ChildRemoved"
+        }
+        for api in api_names:
+            if re.search(rf'\b{api}\b', code):
+                strings.add(api)
     
-    # 5. Table keys
-    table_keys = re.findall(r'\[[\'"]?([A-Za-z_][A-Za-z0-9_]*)[\'"]?\]', code)
-    for key in table_keys:
-        if key:
-            strings.add(key)
+        # 5. Table keys
+        table_keys = re.findall(r'\[[\'"]?([A-Za-z_][A-Za-z0-9_]*)[\'"]?\]', code)
+        for key in table_keys:
+            if key:
+                strings.add(key)
     
-    # 6. loadstring
-    loadstring_calls = re.findall(r'loadstring\s*\(\s*["\']([^"\']+)["\']', code)
-    for s in loadstring_calls:
-        if s:
-            strings.add(s)
+        # 6. loadstring
+        loadstring_calls = re.findall(r'loadstring\s*\(\s*["\']([^"\']+)["\']', code)
+        for s in loadstring_calls:
+            if s:
+                strings.add(s)
     
-    # 7. print/warn
-    print_calls = re.findall(r'(?:print|warn)\s*\(\s*["\']([^"\']+)["\']', code)
-    for s in print_calls:
-        if s:
-            strings.add(s)
+        # 7. print/warn
+        print_calls = re.findall(r'(?:print|warn)\s*\(\s*["\']([^"\']+)["\']', code)
+        for s in print_calls:
+            if s:
+                strings.add(s)
     
-    # 8. error
-    error_calls = re.findall(r'error\s*\(\s*["\']([^"\']+)["\']', code)
-    for s in error_calls:
-        if s:
-            strings.add(s)
+        # 8. error
+        error_calls = re.findall(r'error\s*\(\s*["\']([^"\']+)["\']', code)
+        for s in error_calls:
+            if s:
+                strings.add(s)
     
-    # 9. Lọc theo quy tắc cũ (giữ tương thích)
-    if mode == "simple":
-        result = []
-        for s in strings:
-            if s in api_names or (len(s) > 4 and s[0].islower()):
-                result.append(s)
-        return list(set(result))
+        # 9. Lọc theo quy tắc cũ (giữ tương thích)
+        if mode == "simple":
+            result = []
+            for s in strings:
+                if s in api_names or (len(s) > 4 and s[0].islower()):
+                    result.append(s)
+            return list(set(result))
     
-    return list(strings)
-
+        return list(strings)
     @staticmethod
     def deobfuscate(code: str, engine: LuaEngine, verbose: bool) -> Optional[Tuple[str, dict]]:
         if not engine.available:
@@ -864,6 +868,13 @@ def _extract_strings_static(code: str, mode: str = "simple") -> List[str]:
 
         # v5: filter out error messages that look like source
         is_error = (not ok) or (source and source.startswith('[string "'))
+        # v8 fix: keep the REAL failure reason around instead of discarding
+        # it. The old fallback text below used to always say the same
+        # canned "Lua 5.1/5.3 vs 5.5" guess regardless of what actually
+        # went wrong -- which could be totally unrelated (a real bug, a
+        # timeout, a missing global, etc). Surfacing the actual Lua error
+        # lets you tell the difference instead of guessing from a fixed string.
+        real_error = source if is_error and source else None
         if source and len(source) > 10 and not is_error:
             vm_indicators = ["math.ldexp", "getfenv or function", "v15(", "v16,"]
             vm_score = sum(1 for v in vm_indicators if v in source[:500])
@@ -902,8 +913,11 @@ def _extract_strings_static(code: str, mode: str = "simple") -> List[str]:
         strings = LuaObfuscatorFeribDeobfuscator._extract_strings_static(code)
         pool_strings = LuaObfuscatorFeribDeobfuscator._decode_constant_pool(code)
         lines = ["-- LuaObfuscator.com (Ferib) - Structural Analysis"]
-        lines.append(f"-- Note: Full deobfuscation requires Lua 5.1/5.3 (current engine: Lua 5.5)")
-        lines.append(f"-- The script's internal VM has runtime incompatibilities with Lua 5.5")
+        if real_error:
+            lines.append(f"-- Execution failed with a real Lua error (not a version guess):")
+            lines.append(f"--   {real_error[:300]}")
+        else:
+            lines.append(f"-- Note: VM execution did not produce recoverable source (no Lua error was raised)")
         lines.append(f"")
         if pool_strings:
             lines.append(f"-- Decoded constant pool ({len(pool_strings)} entries):")
@@ -1020,7 +1034,7 @@ local function deep_stub()
         __newindex=function(t,k,v) end,
     })
 end
-for _,g in ipairs({"game","workspace","Instance","Enum","Players","ReplicatedStorage","RunService","TweenService","HttpService","UDim2","Color3","Vector3","CFrame","task","Vector2","UserInputService","Lighting","Debris","StarterGui","StarterPlayer","StarterPack","Teams","Chat","CollectionService","PathfindingService","SoundService","TextService","GuiService","UserSettings","CoreGui","Rect","UDim","Font","NumberSequence","ColorSequence","NumberRange","TweenInfo","RaycastParams","Material","UGCValidationService","MarketplaceService","script","shared","_G","ServerStorage","ServerScriptService","ReplicatedFirst","DataStoreService","MessagingService","BadgeService","GamePassService","InsertService","AssetService","ContentProvider","ContextActionService","LocalizationService","PhysicsService","VoiceChatService","ProximityPromptService","SocialService","TeleportService","AnalyticsService","MemoryStoreService","TextChatService","VRService","GroupService","FriendService","GamepadService","Stats","LogService","ScriptContext","SelectionService","CustomAvatarService","AvatarEditorService","PolicyService","ProcessInstancePhysicsService","HapticService","PluginManager","ChangeHistoryService","TestService","NotificationService","ExperienceNotificationService","VirtualInputManager","VirtualUser","BrickColor","Region3","Ray","Random","PhysicalProperties","OverlapParams","RaycastResult","Axes","Faces","PathWaypoint","DockWidgetPluginGuiInfo","Camera","Terrain","typeof","wait","spawn","delay","tick","warn","elapsedTime","settings","version","Drawing"}) do
+for _,g in ipairs({"game","workspace","Instance","Enum","Players","ReplicatedStorage","RunService","TweenService","HttpService","UDim2","Color3","Vector3","CFrame","task","Vector2","UserInputService","Lighting","Debris","StarterGui","StarterPlayer","StarterPack","Teams","Chat","CollectionService","PathfindingService","SoundService","TextService","GuiService","UserSettings","CoreGui","Rect","UDim","Font","NumberSequence","ColorSequence","NumberRange","TweenInfo","RaycastParams","Material","UGCValidationService","MarketplaceService","script","shared","_G","ServerStorage","ServerScriptService","ReplicatedFirst","DataStoreService","MessagingService","BadgeService","GamePassService","InsertService","AssetService","ContentProvider","ContextActionService","LocalizationService","PhysicsService","VoiceChatService","ProximityPromptService","SocialService","TeleportService","AnalyticsService","MemoryStoreService","TextChatService","VRService","GroupService","FriendService","GamepadService","Stats","LogService","ScriptContext","SelectionService","CustomAvatarService","AvatarEditorService","PolicyService","ProcessInstancePhysicsService","HapticService","PluginManager","ChangeHistoryService","TestService","NotificationService","ExperienceNotificationService","VirtualInputManager","VirtualUser","BrickColor","Region3","Ray","Random","PhysicalProperties","OverlapParams","RaycastResult","Axes","Faces","PathWaypoint","DockWidgetPluginGuiInfo","Camera","Terrain"}) do
     _G[g] = deep_stub()
 end
 
@@ -2144,7 +2158,7 @@ class WeAreDevDeobfuscator:
     # Phase 2: VM trace
     # ============================================================
 
-    _TRACER_LUA = 'local _trace = {}\nlocal _trace_n = 0\nlocal _orig_print = print\n\n-- v5: unpack polyfill for LuaJIT Lua 5.2+ compatibility\nif not _G.unpack then _G.unpack = table.unpack end\n\nlocal function safe_tostring(v)\n    if type(v) == "string" then\n        return string.format("%q", v)\n    end\n    if type(v) == "nil" then return "nil" end\n    if type(v) == "boolean" then return tostring(v) end\n    if type(v) == "function" then return "function" end\n    if type(v) == "table" then return "{}" end\n    return tostring(v)\nend\n\n-- v6 fix: used ONLY for values being ASSIGNED (obj.Prop = value), never\n-- for call arguments. Unlike safe_tostring, this shows the readable chain\n-- path for our tracer proxies (e.g. "game.GetService(Players).LocalPlayer")\n-- instead of collapsing every unresolved object into a bare "{}" -- which\n-- downstream reconstruction used to turn into a misleading "nil". Kept\n-- separate from safe_tostring so existing call-argument patterns (which\n-- expect a plain "{}" placeholder for the self/receiver argument) keep\n-- working unchanged.\nlocal function safe_tostring_value(v)\n    if type(v) == "table" then\n        local mt = getmetatable(v)\n        if mt and mt.__tostring then\n            return tostring(v)\n        end\n        return "{}"\n    end\n    return safe_tostring(v)\nend\n\nlocal function T(entry)\n    _trace_n = _trace_n + 1\n    _trace[_trace_n] = entry\n    _orig_print("[T]" .. entry)\nend\n\nlocal function traced_print(...)\n    local args = {...}\n    local strs = {}\n    for i, v in ipairs(args) do\n        strs[i] = tostring(v)\n    end\n    local line = table.concat(strs, "\\t")\n    _orig_print("[P]" .. line)\n    local arg_strs = {}\n    for i, v in ipairs(args) do\n        arg_strs[i] = safe_tostring(v)\n    end\n    T("print(" .. table.concat(arg_strs, ", ") .. ")")\nend\n\nlocal _cb_depth = 0\nlocal MAX_CB_DEPTH = 3\n\nlocal function make_chain_tracer(name)\n    local proxy = {}\n    local full_path = name\n    local mt = {\n        __index = function(t, k)\n            local kstr = type(k) == "string" and k or tostring(k)\n            T(full_path .. "." .. kstr)\n            local new_path = full_path .. "." .. kstr\n            return make_chain_tracer(new_path)\n        end,\n        __newindex = function(t, k, v)\n            local kstr = type(k) == "string" and k or tostring(k)\n            local vstr = safe_tostring_value(v)\n            T(full_path .. "." .. kstr .. " = " .. vstr)\n        end,\n        __call = function(t, ...)\n            local raw_args = {...}\n            local args = {}\n            for i, a in ipairs(raw_args) do\n                args[i] = safe_tostring(a)\n            end\n            T(full_path .. "(" .. table.concat(args, ", ") .. ")")\n\n            -- v6 fix: keep the last STRING-typed argument as part of the\n            -- returned object\'s identity. Without this, EVERY call like\n            -- game:GetService("RunService"), game:GetService("TweenService"),\n            -- obj:WaitForChild("Name") etc. collapsed into the exact same\n            -- ambiguous path "foo()" -- so later code couldn\'t tell which\n            -- service/child a chain actually came from, and downstream\n            -- reconstruction had to guess (often guessing wrong, e.g. every\n            -- unresolved chain getting attributed to whichever service was\n            -- seen last in the script).\n            local discriminator = nil\n            for i = #raw_args, 1, -1 do\n                if type(raw_args[i]) == "string" then\n                    discriminator = raw_args[i]\n                    break\n                end\n            end\n\n            -- v6 fix: auto-invoke function arguments (event handler\n            -- callbacks). Roblox events (Heartbeat, InputBegan,\n            -- MouseButton1Click, CharacterAdded, ...) never fire on their\n            -- own during a static/offline VM run, so without this the\n            -- body of every :Connect(function() ... end) was completely\n            -- invisible to the tracer -- which is where most of a script\'s\n            -- real logic usually lives. We call it once with plausible\n            -- dummy arguments so its body actually executes and gets traced.\n            if _cb_depth < MAX_CB_DEPTH then\n                for i = 1, #raw_args do\n                    if type(raw_args[i]) == "function" then\n                        _cb_depth = _cb_depth + 1\n                        local dummy1 = make_chain_tracer(full_path .. ":cb_arg")\n                        local ok, err = pcall(raw_args[i], dummy1, false, 0.016, 1)\n                        _cb_depth = _cb_depth - 1\n                        if not ok then\n                            T("-- callback error (" .. full_path .. "): " .. tostring(err))\n                        end\n                    end\n                end\n            end\n\n            if discriminator then\n                return make_chain_tracer(full_path .. "(" .. discriminator .. ")")\n            end\n            return make_chain_tracer(full_path .. "()")\n        end,\n        __tostring = function(t) return full_path end,\n        __concat = function(a, b) return "" end,\n        __len = function(t) return 0 end,\n        __add = function(a, b) return 0 end,\n        __sub = function(a, b) return 0 end,\n        __mul = function(a, b) return 0 end,\n        __div = function(a, b) return 0 end,\n        __mod = function(a, b) return 0 end,\n        __pow = function(a, b) return 0 end,\n        __eq = function(a, b) return false end,\n        __lt = function(a, b) return false end,\n        __le = function(a, b) return false end,\n    }\n    setmetatable(proxy, mt)\n    return proxy\nend\nlocal make_tracer = make_chain_tracer\n\n_G.print = traced_print\n_G.warn = traced_print\n_G.info = traced_print\n\nif not _G.getfenv then _G.getfenv = function(l) return _G end end\nif not _G.getgenv then _G.getgenv = function() return _G end end\nif not _G.setfenv then _G.setfenv = function() end end\nif not _G.unpack then _G.unpack = table.unpack end\n\nlocal _orig_pcall = pcall\n_G.pcall = function(f, ...)\n    local results = {_orig_pcall(f, ...)}\n    local ok = results[1]\n    if not ok then\n        local err = tostring(results[2])\n        if not err:find("pow", 1, true) then\n            T("-- pcall error: " .. err)\n        end\n    end\n    return table.unpack(results)\nend\n\nlocal _orig_xpcall = xpcall\n_G.xpcall = function(f, handler, ...)\n    local results = {_orig_xpcall(f, handler, ...)}\n    local ok = results[1]\n    if not ok then\n        T("-- xpcall error: " .. tostring(results[2]))\n    end\n    return table.unpack(results)\nend\n\nlocal _orig_load = loadstring or load\nif _orig_load then\n    local _real_load = _orig_load\n    _G.load = function(src, ...)\n        if src == nil then return nil, "cannot load nil" end\n        if type(src) ~= "string" and type(src) ~= "function" then\n            local ok, r1, r2 = pcall(_real_load, src, ...)\n            if ok then return r1, r2 else return nil, r2 end\n        end\n        if type(src) == "string" and #src > 5 then\n            local first100 = src:sub(1, 100)\n            if not first100:find("bit32", 1, true) and not first100:find("4294967296", 1, true) then\n                T("-- loadstring called (" .. #src .. " chars)")\n            end\n        end\n        local ok, r1, r2 = pcall(_real_load, src, ...)\n        if ok then return r1, r2 else return nil, r2 end\n    end\n    _G.loadstring = _G.load\n    if debug then\n        if debug.getupvalue then\n            debug.getupvalue = function(...) return nil end\n        end\n        if debug.setupvalue then\n            debug.setupvalue = function(...) return nil end\n        end\n    end\nend\n\n_G.newproxy = function(b)\n    local t = {}\n    if b then setmetatable(t, {__index = function() return nil end}) end\n    return t\nend\n\nlocal api_names = {\n    "game", "workspace", "Instance", "Enum",\n    "Players", "ReplicatedStorage", "ReplicatedFirst",\n    "ServerStorage", "ServerScriptService", "StarterGui",\n    "StarterPlayer", "StarterPack", "StarterCharacterScripts",\n    "Lighting", "Teams", "Chat", "Debris",\n    "TweenService", "RunService", "UserInputService",\n    "HttpService", "MarketplaceService", "CollectionService",\n    "PathfindingService", "SoundService", "TextService",\n    "GuiService", "UserSettings", "CoreGui", "CorePackages",\n    "VirtualUser", "ContentProvider",\n    "DataStoreService", "BadgeService",\n    "UDim", "UDim2", "Color3", "Vector2", "Vector3",\n    "CFrame", "Ray", "Region3", "TweenInfo",\n    "Rect", "Font", "NumberSequence", "ColorSequence",\n    "NumberRange", "RaycastParams", "PhysicalProperties",\n    "task", "coroutine",\n}\n\nfor _, api_name in ipairs(api_names) do\n    _G[api_name] = make_tracer(api_name)\nend\n\n_orig_print("[STUBS_OK]")\n'
+    _TRACER_LUA = 'local _trace = {}\nlocal _trace_n = 0\nlocal _orig_print = print\n\n-- v5: unpack polyfill for LuaJIT Lua 5.2+ compatibility\nif not _G.unpack then _G.unpack = table.unpack end\n\nlocal function safe_tostring(v)\n    if type(v) == "string" then\n        return string.format("%q", v)\n    end\n    if type(v) == "nil" then return "nil" end\n    if type(v) == "boolean" then return tostring(v) end\n    if type(v) == "function" then return "function" end\n    if type(v) == "table" then return "{}" end\n    return tostring(v)\nend\n\n-- v6 fix: used ONLY for values being ASSIGNED (obj.Prop = value), never\n-- for call arguments. Unlike safe_tostring, this shows the readable chain\n-- path for our tracer proxies (e.g. "game.GetService(Players).LocalPlayer")\n-- instead of collapsing every unresolved object into a bare "{}" -- which\n-- downstream reconstruction used to turn into a misleading "nil". Kept\n-- separate from safe_tostring so existing call-argument patterns (which\n-- expect a plain "{}" placeholder for the self/receiver argument) keep\n-- working unchanged.\nlocal function safe_tostring_value(v)\n    if type(v) == "table" then\n        local mt = getmetatable(v)\n        if mt and mt.__tostring then\n            return tostring(v)\n        end\n        return "{}"\n    end\n    return safe_tostring(v)\nend\n\nlocal function T(entry)\n    _trace_n = _trace_n + 1\n    _trace[_trace_n] = entry\n    _orig_print("[T]" .. entry)\nend\n\nlocal function traced_print(...)\n    local args = {...}\n    local strs = {}\n    for i, v in ipairs(args) do\n        strs[i] = tostring(v)\n    end\n    local line = table.concat(strs, "\\t")\n    _orig_print("[P]" .. line)\n    local arg_strs = {}\n    for i, v in ipairs(args) do\n        arg_strs[i] = safe_tostring(v)\n    end\n    T("print(" .. table.concat(arg_strs, ", ") .. ")")\nend\n\nlocal _cb_depth = 0\nlocal MAX_CB_DEPTH = 3\n\n-- forward declaration so helpers defined before make_chain_tracer\'s real\n-- body can still close over the correct (soon-to-be-assigned) local\nlocal make_chain_tracer\n\n-- v8: methods that return a COLLECTION of children in real Roblox\n-- (GetChildren, GetDescendants, ...). Previously these returned an opaque\n-- proxy that pairs()/ipairs() can\'t iterate, so any script whose real\n-- logic lives INSIDE such a loop (e.g. "for _,v in pairs(workspace:GetDescendants())")\n-- traced to nothing at all. Returning a real Lua table with a couple of\n-- fake-but-tracer-backed entries lets the loop body actually execute at\n-- least once, revealing what\'s inside.\nlocal ENUMERABLE_METHODS = {\n    GetChildren = true, GetDescendants = true, GetPlayers = true,\n    GetTouchingParts = true, GetConnectedParts = true,\n}\nlocal function is_enumerable_call(path)\n    for name in pairs(ENUMERABLE_METHODS) do\n        if path:sub(-#name - 1) == "." .. name then return true end\n    end\n    return false\nend\n\n-- v8: methods named "Is..." (IsA, IsDescendantOf, IsAncestorOf, ...) are\n-- boolean-returning in the real Roblox API. Returning a generic proxy here\n-- is truthy in Lua either way, but `not proxy` is always false -- which\n-- silently breaks extremely common patterns like\n-- "if v:IsA(x) and not v:IsDescendantOf(y) then". Returning a real `true`\n-- lets that boolean logic behave as intended so more branches get entered.\nlocal function is_boolean_call(path)\n    local method = path:match("%.([%w_]+)$")\n    return method ~= nil and method:sub(1, 2) == "Is"\nend\nlocal function make_fake_children(parent_path, count)\n    local list = {}\n    for i = 1, (count or 2) do\n        list[i] = make_chain_tracer(parent_path .. "[" .. i .. "]")\n    end\n    return list\nend\n\n-- v8: pick plausible dummy arguments for a callback based on the event\n-- name in its chain path, instead of always using the same generic tuple.\n-- A closer-to-real argument shape means less of the callback body bails\n-- out early on a type mismatch (e.g. "if input.KeyCode == ... then").\nlocal function get_dummy_args(path)\n    if path:find("Heartbeat", 1, true) or path:find("Stepped", 1, true)\n        or path:find("RenderStepped", 1, true) then\n        return {0.016}\n    elseif path:find("InputBegan", 1, true) or path:find("InputEnded", 1, true)\n        or path:find("InputChanged", 1, true) then\n        return {make_chain_tracer(path .. ":input"), false}\n    elseif path:find("Touched", 1, true) or path:find("TouchEnded", 1, true) then\n        return {make_chain_tracer(path .. ":part")}\n    elseif path:find("CharacterAdded", 1, true) or path:find("PlayerAdded", 1, true)\n        or path:find("PlayerRemoving", 1, true) then\n        return {make_chain_tracer(path .. ":char")}\n    else\n        return {make_chain_tracer(path .. ":cb_arg"), false, 0.016, 1}\n    end\nend\n\nfunction make_chain_tracer(name)\n    local proxy = {}\n    local full_path = name\n    local mt = {\n        __index = function(t, k)\n            local kstr = type(k) == "string" and k or tostring(k)\n            T(full_path .. "." .. kstr)\n            local new_path = full_path .. "." .. kstr\n            return make_chain_tracer(new_path)\n        end,\n        __newindex = function(t, k, v)\n            local kstr = type(k) == "string" and k or tostring(k)\n            local vstr = safe_tostring_value(v)\n            T(full_path .. "." .. kstr .. " = " .. vstr)\n        end,\n        __call = function(t, ...)\n            local raw_args = {...}\n            local args = {}\n            for i, a in ipairs(raw_args) do\n                args[i] = safe_tostring(a)\n            end\n            T(full_path .. "(" .. table.concat(args, ", ") .. ")")\n\n            -- v6 fix: keep the last STRING-typed argument as part of the\n            -- returned object\'s identity. Without this, EVERY call like\n            -- game:GetService("RunService"), game:GetService("TweenService"),\n            -- obj:WaitForChild("Name") etc. collapsed into the exact same\n            -- ambiguous path "foo()" -- so later code couldn\'t tell which\n            -- service/child a chain actually came from, and downstream\n            -- reconstruction had to guess (often guessing wrong, e.g. every\n            -- unresolved chain getting attributed to whichever service was\n            -- seen last in the script).\n            local discriminator = nil\n            for i = #raw_args, 1, -1 do\n                if type(raw_args[i]) == "string" then\n                    discriminator = raw_args[i]\n                    break\n                end\n            end\n\n            -- v6 fix: auto-invoke function arguments (event handler\n            -- callbacks). Roblox events (Heartbeat, InputBegan,\n            -- MouseButton1Click, CharacterAdded, ...) never fire on their\n            -- own during a static/offline VM run, so without this the\n            -- body of every :Connect(function() ... end) was completely\n            -- invisible to the tracer -- which is where most of a script\'s\n            -- real logic usually lives. We call it once with plausible\n            -- dummy arguments so its body actually executes and gets traced.\n            if _cb_depth < MAX_CB_DEPTH then\n                for i = 1, #raw_args do\n                    if type(raw_args[i]) == "function" then\n                        _cb_depth = _cb_depth + 1\n                        local dummy_args = get_dummy_args(full_path)\n                        local ok, err = pcall(raw_args[i], table.unpack(dummy_args))\n                        _cb_depth = _cb_depth - 1\n                        if not ok then\n                            T("-- callback error (" .. full_path .. "): " .. tostring(err))\n                        end\n                    end\n                end\n            end\n\n            -- v8: if this call is one of the known "returns a collection"\n            -- methods (GetChildren/GetDescendants/...), hand back a real,\n            -- iterable Lua table instead of another opaque chain proxy.\n            if is_enumerable_call(full_path) then\n                return make_fake_children(full_path, 2)\n            end\n            if is_boolean_call(full_path) then\n                return true\n            end\n\n            if discriminator then\n                return make_chain_tracer(full_path .. "(" .. discriminator .. ")")\n            end\n            return make_chain_tracer(full_path .. "()")\n        end,\n        __tostring = function(t) return full_path end,\n        __concat = function(a, b) return "" end,\n        __len = function(t) return 0 end,\n        __add = function(a, b) return 0 end,\n        __sub = function(a, b) return 0 end,\n        __mul = function(a, b) return 0 end,\n        __div = function(a, b) return 0 end,\n        __mod = function(a, b) return 0 end,\n        __pow = function(a, b) return 0 end,\n        __eq = function(a, b) return false end,\n        -- v8: bias toward entering branches rather than skipping them.\n        -- Comparing a proxy (unresolved value) against a real number/other\n        -- value is inherently a coin flip -- but for RECOVERY purposes,\n        -- missing real logic (false negative) is worse than tracing a\n        -- branch that wouldn\'t truly have run (false positive). Numeric\n        -- threshold checks like "if dims[3] >= 20 and dims[3] <= limit"\n        -- previously always evaluated false here, silently skipping\n        -- everything inside.\n        __lt = function(a, b) return true end,\n        __le = function(a, b) return true end,\n    }\n    setmetatable(proxy, mt)\n    return proxy\nend\nlocal make_tracer = make_chain_tracer\n\n_G.print = traced_print\n_G.warn = traced_print\n_G.info = traced_print\n\nif not _G.getfenv then _G.getfenv = function(l) return _G end end\nif not _G.getgenv then _G.getgenv = function() return _G end end\nif not _G.setfenv then _G.setfenv = function() end end\nif not _G.unpack then _G.unpack = table.unpack end\n\nlocal _orig_pcall = pcall\n_G.pcall = function(f, ...)\n    local results = {_orig_pcall(f, ...)}\n    local ok = results[1]\n    if not ok then\n        local err = tostring(results[2])\n        if not err:find("pow", 1, true) then\n            T("-- pcall error: " .. err)\n        end\n    end\n    return table.unpack(results)\nend\n\nlocal _orig_xpcall = xpcall\n_G.xpcall = function(f, handler, ...)\n    local results = {_orig_xpcall(f, handler, ...)}\n    local ok = results[1]\n    if not ok then\n        T("-- xpcall error: " .. tostring(results[2]))\n    end\n    return table.unpack(results)\nend\n\nlocal _orig_load = loadstring or load\nif _orig_load then\n    local _real_load = _orig_load\n    _G.load = function(src, ...)\n        if src == nil then return nil, "cannot load nil" end\n        if type(src) ~= "string" and type(src) ~= "function" then\n            local ok, r1, r2 = pcall(_real_load, src, ...)\n            if ok then return r1, r2 else return nil, r2 end\n        end\n        if type(src) == "string" and #src > 5 then\n            local first100 = src:sub(1, 100)\n            if not first100:find("bit32", 1, true) and not first100:find("4294967296", 1, true) then\n                T("-- loadstring called (" .. #src .. " chars)")\n            end\n        end\n        local ok, r1, r2 = pcall(_real_load, src, ...)\n        if ok then return r1, r2 else return nil, r2 end\n    end\n    _G.loadstring = _G.load\n    if debug then\n        if debug.getupvalue then\n            debug.getupvalue = function(...) return nil end\n        end\n        if debug.setupvalue then\n            debug.setupvalue = function(...) return nil end\n        end\n    end\nend\n\n_G.newproxy = function(b)\n    local t = {}\n    if b then setmetatable(t, {__index = function() return nil end}) end\n    return t\nend\n\nlocal api_names = {\n    "game", "workspace", "Instance", "Enum",\n    "Players", "ReplicatedStorage", "ReplicatedFirst",\n    "ServerStorage", "ServerScriptService", "StarterGui",\n    "StarterPlayer", "StarterPack", "StarterCharacterScripts",\n    "Lighting", "Teams", "Chat", "Debris",\n    "TweenService", "RunService", "UserInputService",\n    "HttpService", "MarketplaceService", "CollectionService",\n    "PathfindingService", "SoundService", "TextService",\n    "GuiService", "UserSettings", "CoreGui", "CorePackages",\n    "VirtualUser", "ContentProvider",\n    "DataStoreService", "BadgeService",\n    "UDim", "UDim2", "Color3", "Vector2", "Vector3",\n    "CFrame", "Ray", "Region3", "TweenInfo",\n    "Rect", "Font", "NumberSequence", "ColorSequence",\n    "NumberRange", "RaycastParams", "PhysicalProperties",\n    "task", "coroutine",\n}\n\nfor _, api_name in ipairs(api_names) do\n    _G[api_name] = make_tracer(api_name)\nend\n\n_orig_print("[STUBS_OK]")\n'
 
     @staticmethod
     def _get_tracer_lua() -> str:
@@ -3169,7 +3183,7 @@ def _health():
     return "Bot is running."
 
 def _run_keep_alive():
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 10000))
     keep_alive_app.run(host="0.0.0.0", port=port)
 
 def start_keep_alive():
@@ -3208,13 +3222,15 @@ async def _fetch_source(ctx: commands.Context, link: Optional[str]):
     if link:
         if not (link.startswith("http://") or link.startswith("https://")):
             raise ValueError("That doesn't look like a valid link.")
+        # v10: no hard size cap anymore -- some obfuscated scripts (WeAreDev
+        # VM dumps, chunked/merged payloads, etc.) legitimately run past 5MB.
+        # Still stream with a generous timeout so a slow/huge/misbehaving
+        # link can't hang the bot forever.
         async with aiohttp.ClientSession() as session:
-            async with session.get(link, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with session.get(link, timeout=aiohttp.ClientTimeout(total=120)) as resp:
                 if resp.status != 200:
                     raise ValueError(f"Link returned HTTP {resp.status}.")
-                data = await resp.content.read(MAX_FETCH_BYTES + 1)
-                if len(data) > MAX_FETCH_BYTES:
-                    raise ValueError("File from link is too large (over 5 MB).")
+                data = await resp.read()
         filename = link.rsplit("/", 1)[-1] or "link.lua"
         return filename, data.decode("utf-8", errors="replace")
 
@@ -3348,8 +3364,17 @@ async def help_cmd(ctx: commands.Context):
 
 
 if __name__ == "__main__":
+    # v9 fix: always bind the keep-alive port first, regardless of whether
+    # TOKEN is present. Previously start_keep_alive() only ran inside the
+    # `else` branch, so a missing/misread TOKEN env var caused the process
+    # to print a warning and exit immediately -- no port ever got bound,
+    # and Render's port scanner times out with "No open ports detected"
+    # (which looks like a network/deploy issue, but the real cause is the
+    # missing token being swallowed silently).
+    start_keep_alive()
     if not TOKEN:
-        print("[!] Set DISCORD_TOKEN env var before running.")
+        print("[!] DISCORD_TOKEN (or DISCORD_BOT_TOKEN) env var is not set or empty. "
+              "Bot will not connect to Discord, but the keep-alive port is up so "
+              "Render won't kill the service -- fix the env var and redeploy.")
     else:
-        start_keep_alive()
         bot.run(TOKEN)
