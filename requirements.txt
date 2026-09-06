@@ -2,3 +2,4 @@ discord.py
 lupa
 flask
 aiohttp
+requests
