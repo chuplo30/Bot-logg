@@ -1,5 +1,6 @@
 
 import re
+import io
 import sys
 import os
 import zlib
@@ -11,6 +12,84 @@ import tempfile
 import multiprocessing
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple, Any
+
+try:
+    from api_names_db import API_NAMES
+except ImportError:
+    API_NAMES = frozenset()
+
+def _extract_lua_strings(code: str, mode: str = "all") -> List[str]:
+    """Expanded string/identifier extractor using full Roblox API name DB."""
+    strings = set()
+    keywords = {
+        "and", "break", "do", "else", "elseif", "end", "false", "for", "function",
+        "goto", "if", "in", "local", "nil", "not", "or", "repeat", "return",
+        "then", "true", "until", "while", "continue",
+    }
+
+    # 1) Quoted string literals
+    for quote, content in re.findall(r'''(["'])((?:(?!\1).)*)\1''', code, re.DOTALL):
+        if content:
+            strings.add(content)
+
+    # 2) Long bracket strings
+    for s in re.findall(r'\[=*\[(.*?)\]=*\]', code, re.DOTALL):
+        if s and s.strip():
+            strings.add(s.strip())
+
+    # 3) Identifiers
+    identifiers = re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\b', code)
+    for ident in identifiers:
+        if len(ident) > 1 and ident not in keywords:
+            strings.add(ident)
+
+    # 4) API names from full DB
+    for ident in set(identifiers):
+        if ident in API_NAMES:
+            strings.add(ident)
+
+    # 5) Table keys: t["Key"] / t.Key
+    for key in re.findall(r'\[[\'"]([A-Za-z_][A-Za-z0-9_]*)[\'"]\]', code):
+        strings.add(key)
+    for key in re.findall(r'\.([A-Za-z_][A-Za-z0-9_]*)\b', code):
+        if key not in keywords:
+            strings.add(key)
+
+    # 6) loadstring / load payloads
+    for s in re.findall(r'(?:loadstring|load)\s*\(\s*["\']([^"\']+)["\']', code):
+        if s:
+            strings.add(s)
+
+    # 7) print / warn / error / assert messages
+    for s in re.findall(r'(?:print|warn|error|assert)\s*\(\s*["\']([^"\']+)["\']', code):
+        if s:
+            strings.add(s)
+
+    # 8) Common API call string args
+    for s in re.findall(
+        r'(?:GetService|WaitForChild|FindFirstChild|FindFirstChildOfClass|FindFirstChildWhichIsA|'
+        r'FindFirstAncestor|GetAttribute|SetAttribute|FireServer|InvokeServer|BindToRenderStep|'
+        r'HttpGet|HttpPost|GetDataStore|require)\s*\(\s*["\']([^"\']+)["\']',
+        code,
+    ):
+        if s:
+            strings.add(s)
+
+    # 9) Enum.X.Y
+    for a, b in re.findall(r'\bEnum\.([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)', code):
+        strings.add(a)
+        strings.add(b)
+        strings.add("Enum." + a)
+        strings.add("Enum." + a + "." + b)
+
+    if mode == "simple":
+        result = []
+        for s in strings:
+            if s in API_NAMES or (len(s) > 4 and s[0].islower()) or s.startswith("Enum."):
+                result.append(s)
+        return list(set(result))
+    return list(strings)
+
 
 
 # ============================================================
@@ -31,14 +110,21 @@ def decode_decimal_escapes(s: str) -> str:
     result = []
     i = 0
     while i < len(s):
-        if s[i] == '\\' and i + 1 < len(s) and s[i+1].isdigit():
+        if s[i] == '\\' and i + 1 < len(s) and '0' <= s[i+1] <= '9':
             num_str = ''
             j = i + 1
-            while j < len(s) and j < i + 4 and s[j].isdigit():
+            while j < len(s) and j < i + 4 and '0' <= s[j] <= '9':
                 num_str += s[j]
                 j += 1
             if num_str:
-                result.append(chr(int(num_str)))
+                try:
+                    codepoint = int(num_str)
+                    if 0 <= codepoint <= 0x10FFFF:
+                        result.append(chr(codepoint))
+                    else:
+                        result.append(s[i:j])
+                except (ValueError, OverflowError):
+                    result.append(s[i:j])
                 i = j
                 continue
         result.append(s[i])
@@ -218,6 +304,141 @@ return {status=ok and "ok" or "runtime_error", error=ok and nil or tostring(resu
         """Execute and only capture print output."""
         ok, source, prints = self.execute_and_capture(code, timeout)
         return ok, prints
+
+
+# ============================================================
+# v12: Simple multi-layer wrapper peeler ("Miyu Hub"-style)
+# ============================================================
+# Some redistribution "hubs" wrap an already-obfuscated script (e.g. a
+# WeAreDevs payload) in one or more extra layers of trivial byte-level
+# encoding -- typically:
+#   local function NAME()
+#       local VAR = "\ddd\ddd..."   -- giant escaped-byte string
+#       <loop building a new string via string.char(SIMPLE_EXPR)>
+#       (loadstring or load)(result)()
+#   end
+#   NAME()
+# The "encryption" here is trivial (byte complement, fixed-key XOR,
+# additive/subtractive shift) and adds no real protection -- it's just
+# packaging. This peels those layers in pure Python (no Lua VM needed)
+# before running normal obfuscator detection, so `.l` can see straight
+# through to the REAL underlying obfuscator (WeAreDevs, etc.) instead of
+# reporting "Unknown".
+
+def _peel_extract_balanced(s: str, open_paren_idx: int):
+    """s[open_paren_idx] must be '('. Returns (inner_text, idx_after_close)."""
+    depth = 0
+    for i in range(open_paren_idx, len(s)):
+        if s[i] == '(':
+            depth += 1
+        elif s[i] == ')':
+            depth -= 1
+            if depth == 0:
+                return s[open_paren_idx + 1:i], i + 1
+    return None, None
+
+
+def _peel_one_wrapper_layer(code: str) -> Optional[str]:
+    m = re.search(
+        r'local\s+function\s+(\w+)\(\)\s*local\s+\w+\s*=\s*"((?:\\\d{1,3})+)"',
+        code
+    )
+    if not m:
+        return None
+    escaped = m.group(2)
+    byte_vals = [int(x) for x in re.findall(r'\\(\d{1,3})', escaped)]
+    if len(byte_vals) < 16:
+        return None  # too short to be a real wrapped payload
+
+    sc_idx = code.find('string.char(', m.end())
+    if sc_idx == -1 or sc_idx - m.end() > 400:
+        return None
+    inner, _ = _peel_extract_balanced(code, sc_idx + len('string.char'))
+    if inner is None or ':byte(' not in inner:
+        return None
+
+    norm = re.sub(r'\w+:byte\(\w+\)', 'BYTE', inner).strip()
+
+    def evaluate(b: int) -> Optional[int]:
+        if norm == '255-BYTE':
+            return 255 - b
+        mm = re.search(r'bit32\.bxor\(BYTE,\s*(\d+)\)', norm)
+        if mm:
+            return b ^ int(mm.group(1))
+        mm = re.search(r'^BYTE\s*~\s*(\d+)$', norm)
+        if mm:
+            return b ^ int(mm.group(1))
+        mm = re.search(r'^\(?BYTE\s*-\s*(\d+)\)?', norm)
+        if mm:
+            return (b - int(mm.group(1))) % 256
+        mm = re.search(r'^\(?BYTE\s*\+\s*(\d+)\)?', norm)
+        if mm:
+            return (b + int(mm.group(1))) % 256
+        return None
+
+    out = bytearray()
+    for b in byte_vals:
+        v = evaluate(b)
+        if v is None:
+            return None
+        out.append(v & 0xFF)
+    try:
+        return out.decode('utf-8')
+    except UnicodeDecodeError:
+        return out.decode('utf-8', errors='replace')
+
+
+def peel_wrapper_layers(code: str, max_layers: int = 6, verbose: bool = False) -> Tuple[str, int]:
+    """Repeatedly unwrap simple hub-style byte-encoding layers.
+    Returns (possibly-unwrapped code, number of layers peeled)."""
+    layers = 0
+    cur = code
+    for _ in range(max_layers):
+        nxt = _peel_one_wrapper_layer(cur)
+        if nxt is None:
+            break
+        layers += 1
+        cur = nxt
+        if verbose:
+            print(f"[*] Peeled wrapper layer {layers} ({len(cur):,} chars)")
+    return cur, layers
+
+
+# ============================================================
+# v12: Luau -> standard-Lua syntax transpile (compound assignment)
+# ============================================================
+# lupa binds to LuaJIT/PUC-Lua, NOT Luau (Roblox's language fork) -- so
+# genuine Luau-only syntax (like compound assignment operators, which
+# standard Lua has never supported in any version) fails to even LOAD,
+# with a generic "syntax error near '+'"-style message that gives no hint
+# it's a language-dialect mismatch rather than a real bug. This rewrites
+# the small, common subset (`X += Y` etc.) into plain `X = X + (Y)` before
+# handing code to the Lua engine. Conservative on purpose: only matches
+# when the right-hand side is a single simple token (identifier or
+# number), which covers compiled-VM-dispatch-style code; anything with a
+# more complex RHS is left alone rather than risk mistranslating it.
+
+_LUAU_COMPOUND_OPS = ['+=', '-=', '//=', '*=', '/=', '..=', '^=', '%=']
+_LUAU_COMPOUND_RE = re.compile(
+    r'([A-Za-z_]\w*(?:\.[A-Za-z_]\w*|\[[^\[\]]{1,80}\])*)'
+    r'\s*(\+=|-=|//=|\*=|/=|\.\.=|\^=|%=)\s*'
+    r'([A-Za-z_]\w*|\d+(?:\.\d+)?)'
+)
+
+
+def transpile_luau_compound_ops(code: str) -> Tuple[str, int]:
+    if not any(op in code for op in _LUAU_COMPOUND_OPS):
+        return code, 0
+    count = 0
+
+    def _repl(m):
+        nonlocal count
+        lhs, op, rhs = m.group(1), m.group(2), m.group(3)
+        count += 1
+        return f"{lhs} = {lhs} {op[:-1]} ({rhs})"
+
+    new_code = _LUAU_COMPOUND_RE.sub(_repl, code)
+    return new_code, count
 
 
 # ============================================================
@@ -548,69 +769,7 @@ class IronBrewDeobfuscator:
 
     @staticmethod
     def _extract_strings(code: str, mode: str = "all") -> List[str]:
-        strings = set()
-        
-        str_literals = re.findall(r'''(["'])((?:(?!\1).)*)\1''', code, re.DOTALL)
-        for quote, content in str_literals:
-            if content:
-                strings.add(content)
-        
-        long_strings = re.findall(r'\[=*\[(.*?)\]=*\]', code, re.DOTALL)
-        for s in long_strings:
-            if s:
-                strings.add(s.strip())
-        
-        if mode == "all":
-            identifiers = re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\b', code)
-            keywords = {"and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while"}
-            for ident in identifiers:
-                if len(ident) > 2 and ident not in keywords:
-                    strings.add(ident)
-        
-        api_names = {
-            "print", "warn", "error", "tostring", "tonumber", "type", "next", "pairs", "ipairs", "select", "unpack",
-            "game", "workspace", "script", "Instance", "new", "Clone", "Destroy", "FindFirstChild", "GetService",
-            "WaitForChild", "GetChildren", "GetDescendants", "AddTag", "HasTag", "GetTags",
-            "TweenService", "TweenInfo", "Create", "Play", "Cancel", "Pause", "Resume",
-            "Players", "LocalPlayer", "PlayerGui", "Backpack", "StarterGui", "StarterPack",
-            "Character", "Humanoid", "RootPart", "Torso", "Head", "LeftArm", "RightArm", "LeftLeg", "RightLeg",
-            "CFrame", "Vector3", "Color3", "UDim2", "Rect", "Region3", "BrickColor",
-            "RunService", "Heartbeat", "Stepped", "RenderStepped", "BindToRenderStep", "UnbindFromRenderStep",
-            "UserInputService", "InputBegan", "InputEnded", "InputChanged",
-            "ContextActionService", "BindAction", "UnbindAction",
-            "HttpService", "GetAsync", "PostAsync", "RequestAsync", "JSONDecode", "JSONEncode",
-            "DataStoreService", "GetDataStore", "SetAsync", "GetAsync", "UpdateAsync",
-            "ReplicatedStorage", "ReplicatedFirst", "ServerScriptService", "ServerStorage",
-            "SoundService", "Lighting", "Debris", "Delay", "Spawn", "wait", "task.wait"
-        }
-        for api in api_names:
-            if re.search(rf'\b{api}\b', code):
-                strings.add(api)
-        
-        table_keys = re.findall(r'\[[\'"]?([A-Za-z_][A-Za-z0-9_]*)[\'"]?\]', code)
-        for key in table_keys:
-            if key:
-                strings.add(key)
-        
-        loadstring_calls = re.findall(r'loadstring\s*\(\s*["\']([^"\']+)["\']', code)
-        for s in loadstring_calls:
-            if s:
-                strings.add(s)
-        
-        print_calls = re.findall(r'(?:print|warn)\s*\(\s*["\']([^"\']+)["\']', code)
-        for s in print_calls:
-            if s:
-                strings.add(s)
-        
-        error_calls = re.findall(r'error\s*\(\s*["\']([^"\']+)["\']', code)
-        for s in error_calls:
-            if s:
-                strings.add(s)
-        
-        return list(strings)
-
-class WANDeobfuscator:
-    """WAN OBFUSCATE / WAN OBFUSCATOR: byte table + XOR + VM."""
+        return _extract_lua_strings(code, mode)
 
 
 class WANDeobfuscator:
@@ -769,87 +928,8 @@ class LuaObfuscatorFeribDeobfuscator:
 
     @staticmethod
     def _extract_strings_static(code: str, mode: str = "simple") -> List[str]:
-        strings = set()
-    
-        # 1. String literal "..." và '...'
-        str_literals = re.findall(r'''(["'])((?:(?!\1).)*)\1''', code, re.DOTALL)
-        for _, content in str_literals:
-            if content:
-                strings.add(content)
-    
-        # 2. Long bracket strings
-        long_strings = re.findall(r'\[=*\[(.*?)\]=*\]', code, re.DOTALL)
-        for s in long_strings:
-            if s:
-                strings.add(s.strip())
-    
-        # 3. Nếu mode == "all" → thêm tên biến/hàm
-        if mode == "all":
-            identifiers = re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\b', code)
-            keywords = {"and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while"}
-            for ident in identifiers:
-                if len(ident) > 2 and ident not in keywords:
-                    strings.add(ident)
-    
-        # 4. API names (mở rộng)
-        api_names = {
-            "print", "warn", "error", "tostring", "tonumber", "type", "next", "pairs", "ipairs", "select", "unpack",
-            "game", "workspace", "script", "Instance", "new", "Clone", "Destroy", "FindFirstChild", "GetService",
-            "WaitForChild", "GetChildren", "GetDescendants", "AddTag", "HasTag", "GetTags",
-            "TweenService", "TweenInfo", "Create", "Play", "Cancel", "Pause", "Resume",
-            "Players", "LocalPlayer", "PlayerGui", "Backpack", "StarterGui", "StarterPack",
-            "Character", "Humanoid", "RootPart", "Torso", "Head", "LeftArm", "RightArm", "LeftLeg", "RightLeg",
-            "CFrame", "Vector3", "Color3", "UDim2", "Rect", "Region3", "BrickColor",
-            "RunService", "Heartbeat", "Stepped", "RenderStepped", "BindToRenderStep", "UnbindFromRenderStep",
-            "UserInputService", "InputBegan", "InputEnded", "InputChanged",
-            "ContextActionService", "BindAction", "UnbindAction",
-            "HttpService", "GetAsync", "PostAsync", "RequestAsync", "JSONDecode", "JSONEncode",
-            "DataStoreService", "GetDataStore", "SetAsync", "GetAsync", "UpdateAsync",
-            "ReplicatedStorage", "ReplicatedFirst", "ServerScriptService", "ServerStorage",
-            "SoundService", "Lighting", "Debris", "Delay", "Spawn", "wait", "task.wait",
-            "HttpGet", "HttpPost", "setreadonly", "readfile", "writefile",
-            "getgenv", "setgenv", "getfenv", "setfenv", "loadstring",
-            "pcall", "xpcall", "require", "spawn", "delay",
-            "FireServer", "InvokeServer", "OnServerEvent", "OnClientEvent",
-            "Connect", "Wait", "ChildAdded", "ChildRemoved"
-        }
-        for api in api_names:
-            if re.search(rf'\b{api}\b', code):
-                strings.add(api)
-    
-        # 5. Table keys
-        table_keys = re.findall(r'\[[\'"]?([A-Za-z_][A-Za-z0-9_]*)[\'"]?\]', code)
-        for key in table_keys:
-            if key:
-                strings.add(key)
-    
-        # 6. loadstring
-        loadstring_calls = re.findall(r'loadstring\s*\(\s*["\']([^"\']+)["\']', code)
-        for s in loadstring_calls:
-            if s:
-                strings.add(s)
-    
-        # 7. print/warn
-        print_calls = re.findall(r'(?:print|warn)\s*\(\s*["\']([^"\']+)["\']', code)
-        for s in print_calls:
-            if s:
-                strings.add(s)
-    
-        # 8. error
-        error_calls = re.findall(r'error\s*\(\s*["\']([^"\']+)["\']', code)
-        for s in error_calls:
-            if s:
-                strings.add(s)
-    
-        # 9. Lọc theo quy tắc cũ (giữ tương thích)
-        if mode == "simple":
-            result = []
-            for s in strings:
-                if s in api_names or (len(s) > 4 and s[0].islower()):
-                    result.append(s)
-            return list(set(result))
-    
-        return list(strings)
+        return _extract_lua_strings(code, mode)
+
     @staticmethod
     def deobfuscate(code: str, engine: LuaEngine, verbose: bool) -> Optional[Tuple[str, dict]]:
         if not engine.available:
@@ -1505,7 +1585,7 @@ class WeAreDevDisassembler:
 
 
 class WeAreDevDeobfuscator:
-    """WeAreDev v1.0.0 decompiler - v5.5 with CFF block extraction, enhanced tracer,
+    """WeAreDev v1.0.0 decompiler - v5.6 with arg-trace + CFF block extraction, enhanced tracer,
     arithmetic simplification, deep body mining, smart variable naming,
     bytecode disassembler, and improved VM analysis."""
 
@@ -2158,7 +2238,7 @@ class WeAreDevDeobfuscator:
     # Phase 2: VM trace
     # ============================================================
 
-    _TRACER_LUA = 'local _trace = {}\nlocal _trace_n = 0\nlocal _orig_print = print\n\n-- v5: unpack polyfill for LuaJIT Lua 5.2+ compatibility\nif not _G.unpack then _G.unpack = table.unpack end\n\nlocal function safe_tostring(v)\n    if type(v) == "string" then\n        return string.format("%q", v)\n    end\n    if type(v) == "nil" then return "nil" end\n    if type(v) == "boolean" then return tostring(v) end\n    if type(v) == "function" then return "function" end\n    if type(v) == "table" then return "{}" end\n    return tostring(v)\nend\n\n-- v6 fix: used ONLY for values being ASSIGNED (obj.Prop = value), never\n-- for call arguments. Unlike safe_tostring, this shows the readable chain\n-- path for our tracer proxies (e.g. "game.GetService(Players).LocalPlayer")\n-- instead of collapsing every unresolved object into a bare "{}" -- which\n-- downstream reconstruction used to turn into a misleading "nil". Kept\n-- separate from safe_tostring so existing call-argument patterns (which\n-- expect a plain "{}" placeholder for the self/receiver argument) keep\n-- working unchanged.\nlocal function safe_tostring_value(v)\n    if type(v) == "table" then\n        local mt = getmetatable(v)\n        if mt and mt.__tostring then\n            return tostring(v)\n        end\n        return "{}"\n    end\n    return safe_tostring(v)\nend\n\nlocal function T(entry)\n    _trace_n = _trace_n + 1\n    _trace[_trace_n] = entry\n    _orig_print("[T]" .. entry)\nend\n\nlocal function traced_print(...)\n    local args = {...}\n    local strs = {}\n    for i, v in ipairs(args) do\n        strs[i] = tostring(v)\n    end\n    local line = table.concat(strs, "\\t")\n    _orig_print("[P]" .. line)\n    local arg_strs = {}\n    for i, v in ipairs(args) do\n        arg_strs[i] = safe_tostring(v)\n    end\n    T("print(" .. table.concat(arg_strs, ", ") .. ")")\nend\n\nlocal _cb_depth = 0\nlocal MAX_CB_DEPTH = 3\n\n-- forward declaration so helpers defined before make_chain_tracer\'s real\n-- body can still close over the correct (soon-to-be-assigned) local\nlocal make_chain_tracer\n\n-- v8: methods that return a COLLECTION of children in real Roblox\n-- (GetChildren, GetDescendants, ...). Previously these returned an opaque\n-- proxy that pairs()/ipairs() can\'t iterate, so any script whose real\n-- logic lives INSIDE such a loop (e.g. "for _,v in pairs(workspace:GetDescendants())")\n-- traced to nothing at all. Returning a real Lua table with a couple of\n-- fake-but-tracer-backed entries lets the loop body actually execute at\n-- least once, revealing what\'s inside.\nlocal ENUMERABLE_METHODS = {\n    GetChildren = true, GetDescendants = true, GetPlayers = true,\n    GetTouchingParts = true, GetConnectedParts = true,\n}\nlocal function is_enumerable_call(path)\n    for name in pairs(ENUMERABLE_METHODS) do\n        if path:sub(-#name - 1) == "." .. name then return true end\n    end\n    return false\nend\n\n-- v8: methods named "Is..." (IsA, IsDescendantOf, IsAncestorOf, ...) are\n-- boolean-returning in the real Roblox API. Returning a generic proxy here\n-- is truthy in Lua either way, but `not proxy` is always false -- which\n-- silently breaks extremely common patterns like\n-- "if v:IsA(x) and not v:IsDescendantOf(y) then". Returning a real `true`\n-- lets that boolean logic behave as intended so more branches get entered.\nlocal function is_boolean_call(path)\n    local method = path:match("%.([%w_]+)$")\n    return method ~= nil and method:sub(1, 2) == "Is"\nend\nlocal function make_fake_children(parent_path, count)\n    local list = {}\n    for i = 1, (count or 2) do\n        list[i] = make_chain_tracer(parent_path .. "[" .. i .. "]")\n    end\n    return list\nend\n\n-- v8: pick plausible dummy arguments for a callback based on the event\n-- name in its chain path, instead of always using the same generic tuple.\n-- A closer-to-real argument shape means less of the callback body bails\n-- out early on a type mismatch (e.g. "if input.KeyCode == ... then").\nlocal function get_dummy_args(path)\n    if path:find("Heartbeat", 1, true) or path:find("Stepped", 1, true)\n        or path:find("RenderStepped", 1, true) then\n        return {0.016}\n    elseif path:find("InputBegan", 1, true) or path:find("InputEnded", 1, true)\n        or path:find("InputChanged", 1, true) then\n        return {make_chain_tracer(path .. ":input"), false}\n    elseif path:find("Touched", 1, true) or path:find("TouchEnded", 1, true) then\n        return {make_chain_tracer(path .. ":part")}\n    elseif path:find("CharacterAdded", 1, true) or path:find("PlayerAdded", 1, true)\n        or path:find("PlayerRemoving", 1, true) then\n        return {make_chain_tracer(path .. ":char")}\n    else\n        return {make_chain_tracer(path .. ":cb_arg"), false, 0.016, 1}\n    end\nend\n\nfunction make_chain_tracer(name)\n    local proxy = {}\n    local full_path = name\n    local mt = {\n        __index = function(t, k)\n            local kstr = type(k) == "string" and k or tostring(k)\n            T(full_path .. "." .. kstr)\n            local new_path = full_path .. "." .. kstr\n            return make_chain_tracer(new_path)\n        end,\n        __newindex = function(t, k, v)\n            local kstr = type(k) == "string" and k or tostring(k)\n            local vstr = safe_tostring_value(v)\n            T(full_path .. "." .. kstr .. " = " .. vstr)\n        end,\n        __call = function(t, ...)\n            local raw_args = {...}\n            local args = {}\n            for i, a in ipairs(raw_args) do\n                args[i] = safe_tostring(a)\n            end\n            T(full_path .. "(" .. table.concat(args, ", ") .. ")")\n\n            -- v6 fix: keep the last STRING-typed argument as part of the\n            -- returned object\'s identity. Without this, EVERY call like\n            -- game:GetService("RunService"), game:GetService("TweenService"),\n            -- obj:WaitForChild("Name") etc. collapsed into the exact same\n            -- ambiguous path "foo()" -- so later code couldn\'t tell which\n            -- service/child a chain actually came from, and downstream\n            -- reconstruction had to guess (often guessing wrong, e.g. every\n            -- unresolved chain getting attributed to whichever service was\n            -- seen last in the script).\n            local discriminator = nil\n            for i = #raw_args, 1, -1 do\n                if type(raw_args[i]) == "string" then\n                    discriminator = raw_args[i]\n                    break\n                end\n            end\n\n            -- v6 fix: auto-invoke function arguments (event handler\n            -- callbacks). Roblox events (Heartbeat, InputBegan,\n            -- MouseButton1Click, CharacterAdded, ...) never fire on their\n            -- own during a static/offline VM run, so without this the\n            -- body of every :Connect(function() ... end) was completely\n            -- invisible to the tracer -- which is where most of a script\'s\n            -- real logic usually lives. We call it once with plausible\n            -- dummy arguments so its body actually executes and gets traced.\n            if _cb_depth < MAX_CB_DEPTH then\n                for i = 1, #raw_args do\n                    if type(raw_args[i]) == "function" then\n                        _cb_depth = _cb_depth + 1\n                        local dummy_args = get_dummy_args(full_path)\n                        local ok, err = pcall(raw_args[i], table.unpack(dummy_args))\n                        _cb_depth = _cb_depth - 1\n                        if not ok then\n                            T("-- callback error (" .. full_path .. "): " .. tostring(err))\n                        end\n                    end\n                end\n            end\n\n            -- v8: if this call is one of the known "returns a collection"\n            -- methods (GetChildren/GetDescendants/...), hand back a real,\n            -- iterable Lua table instead of another opaque chain proxy.\n            if is_enumerable_call(full_path) then\n                return make_fake_children(full_path, 2)\n            end\n            if is_boolean_call(full_path) then\n                return true\n            end\n\n            if discriminator then\n                return make_chain_tracer(full_path .. "(" .. discriminator .. ")")\n            end\n            return make_chain_tracer(full_path .. "()")\n        end,\n        __tostring = function(t) return full_path end,\n        __concat = function(a, b) return "" end,\n        __len = function(t) return 0 end,\n        __add = function(a, b) return 0 end,\n        __sub = function(a, b) return 0 end,\n        __mul = function(a, b) return 0 end,\n        __div = function(a, b) return 0 end,\n        __mod = function(a, b) return 0 end,\n        __pow = function(a, b) return 0 end,\n        __eq = function(a, b) return false end,\n        -- v8: bias toward entering branches rather than skipping them.\n        -- Comparing a proxy (unresolved value) against a real number/other\n        -- value is inherently a coin flip -- but for RECOVERY purposes,\n        -- missing real logic (false negative) is worse than tracing a\n        -- branch that wouldn\'t truly have run (false positive). Numeric\n        -- threshold checks like "if dims[3] >= 20 and dims[3] <= limit"\n        -- previously always evaluated false here, silently skipping\n        -- everything inside.\n        __lt = function(a, b) return true end,\n        __le = function(a, b) return true end,\n    }\n    setmetatable(proxy, mt)\n    return proxy\nend\nlocal make_tracer = make_chain_tracer\n\n_G.print = traced_print\n_G.warn = traced_print\n_G.info = traced_print\n\nif not _G.getfenv then _G.getfenv = function(l) return _G end end\nif not _G.getgenv then _G.getgenv = function() return _G end end\nif not _G.setfenv then _G.setfenv = function() end end\nif not _G.unpack then _G.unpack = table.unpack end\n\nlocal _orig_pcall = pcall\n_G.pcall = function(f, ...)\n    local results = {_orig_pcall(f, ...)}\n    local ok = results[1]\n    if not ok then\n        local err = tostring(results[2])\n        if not err:find("pow", 1, true) then\n            T("-- pcall error: " .. err)\n        end\n    end\n    return table.unpack(results)\nend\n\nlocal _orig_xpcall = xpcall\n_G.xpcall = function(f, handler, ...)\n    local results = {_orig_xpcall(f, handler, ...)}\n    local ok = results[1]\n    if not ok then\n        T("-- xpcall error: " .. tostring(results[2]))\n    end\n    return table.unpack(results)\nend\n\nlocal _orig_load = loadstring or load\nif _orig_load then\n    local _real_load = _orig_load\n    _G.load = function(src, ...)\n        if src == nil then return nil, "cannot load nil" end\n        if type(src) ~= "string" and type(src) ~= "function" then\n            local ok, r1, r2 = pcall(_real_load, src, ...)\n            if ok then return r1, r2 else return nil, r2 end\n        end\n        if type(src) == "string" and #src > 5 then\n            local first100 = src:sub(1, 100)\n            if not first100:find("bit32", 1, true) and not first100:find("4294967296", 1, true) then\n                T("-- loadstring called (" .. #src .. " chars)")\n            end\n        end\n        local ok, r1, r2 = pcall(_real_load, src, ...)\n        if ok then return r1, r2 else return nil, r2 end\n    end\n    _G.loadstring = _G.load\n    if debug then\n        if debug.getupvalue then\n            debug.getupvalue = function(...) return nil end\n        end\n        if debug.setupvalue then\n            debug.setupvalue = function(...) return nil end\n        end\n    end\nend\n\n_G.newproxy = function(b)\n    local t = {}\n    if b then setmetatable(t, {__index = function() return nil end}) end\n    return t\nend\n\nlocal api_names = {\n    "game", "workspace", "Instance", "Enum",\n    "Players", "ReplicatedStorage", "ReplicatedFirst",\n    "ServerStorage", "ServerScriptService", "StarterGui",\n    "StarterPlayer", "StarterPack", "StarterCharacterScripts",\n    "Lighting", "Teams", "Chat", "Debris",\n    "TweenService", "RunService", "UserInputService",\n    "HttpService", "MarketplaceService", "CollectionService",\n    "PathfindingService", "SoundService", "TextService",\n    "GuiService", "UserSettings", "CoreGui", "CorePackages",\n    "VirtualUser", "ContentProvider",\n    "DataStoreService", "BadgeService",\n    "UDim", "UDim2", "Color3", "Vector2", "Vector3",\n    "CFrame", "Ray", "Region3", "TweenInfo",\n    "Rect", "Font", "NumberSequence", "ColorSequence",\n    "NumberRange", "RaycastParams", "PhysicalProperties",\n    "task", "coroutine",\n}\n\nfor _, api_name in ipairs(api_names) do\n    _G[api_name] = make_tracer(api_name)\nend\n\n_orig_print("[STUBS_OK]")\n'
+    _TRACER_LUA = 'local _trace = {}\nlocal _trace_n = 0\nlocal _orig_print = print\nlocal _hb = 0\nlocal _HB_MAX = 5\nlocal _inst_n = 0\n\nif not _G.unpack then _G.unpack = table.unpack end\nif not getfenv then getfenv = function() return _G end end\nif not setfenv then setfenv = function() end end\nif not newproxy then newproxy = function(u) local t={} if u then setmetatable(t,{}) end return t end end\n\nlocal bit32 = {}\nlocal function U(x) x=x or 0; if x<0 then x=x+4294967296 end; return x%4294967296 end\nfunction bit32.bxor(a,b) a,b=U(a),U(b);local r,p=0,1;for i=0,31 do local ba,bb=a%2,b%2;if ba~=bb then r=r+p end;a=(a-ba)/2;b=(b-bb)/2;p=p*2 end;return r end\nfunction bit32.band(a,b) a,b=U(a),U(b);local r,p=0,1;for i=0,31 do local ba,bb=a%2,b%2;if ba==1 and bb==1 then r=r+p end;a=(a-ba)/2;b=(b-bb)/2;p=p*2 end;return r end\nfunction bit32.bor(a,b) a,b=U(a),U(b);local r,p=0,1;for i=0,31 do local ba,bb=a%2,b%2;if ba==1 or bb==1 then r=r+p end;a=(a-ba)/2;b=(b-bb)/2;p=p*2 end;return r end\nfunction bit32.bnot(a) return 4294967295-U(a) end\nfunction bit32.lshift(a,n) a=U(a);n=(n or 0)%32;if n<0 then n=n+32 end;return (a*(2^n))%4294967296 end\nfunction bit32.rshift(a,n) a=U(a);n=(n or 0)%32;if n<0 then n=n+32 end;return math.floor(a/(2^n)) end\n_G.bit32 = bit32\n\nlocal function T(entry)\n    _trace_n = _trace_n + 1\n    if _trace_n > 4000 then return end\n    _trace[_trace_n] = entry\n    _orig_print("[T]" .. entry)\nend\n\nlocal function path_of(v)\n    if type(v) ~= "table" then return tostring(v) end\n    local mt = getmetatable(v)\n    if mt and mt.__path then return mt.__path end\n    if mt and mt.__tostring then return tostring(v) end\n    return "{}"\nend\n\nlocal function fmt_arg(v)\n    local t = type(v)\n    if t == "string" then return string.format("%q", v) end\n    if t == "number" then\n        if v ~= v then return "nan" end\n        if v == math.floor(v) and math.abs(v) < 1e12 then return string.format("%d", v) end\n        return tostring(v)\n    end\n    if t == "boolean" or t == "nil" then return tostring(v) end\n    if t == "function" then return "function" end\n    if t == "table" then return path_of(v) end\n    return t\nend\n\nlocal function vec3(x,y,z)\n    local o = {X = x or 0, Y = y or 0, Z = z or 0}\n    local mt = {}\n    mt.__path = string.format("Vector3.new(%.4g, %.4g, %.4g)", o.X, o.Y, o.Z)\n    mt.__tostring = function() return mt.__path end\n    mt.__add = function(a,b) return vec3((a.X or 0)+(b.X or 0),(a.Y or 0)+(b.Y or 0),(a.Z or 0)+(b.Z or 0)) end\n    mt.__sub = function(a,b) return vec3((a.X or 0)-(b.X or 0),(a.Y or 0)-(b.Y or 0),(a.Z or 0)-(b.Z or 0)) end\n    mt.__mul = function(a,b)\n        if type(b)=="number" then return vec3(a.X*b,a.Y*b,a.Z*b) end\n        if type(a)=="number" then return vec3(b.X*a,b.Y*a,b.Z*a) end\n        return vec3(0,0,0)\n    end\n    mt.__div = function(a,b) if type(b)=="number" and b~=0 then return vec3(a.X/b,a.Y/b,a.Z/b) end return vec3(0,0,0) end\n    mt.__unm = function(a) return vec3(-a.X,-a.Y,-a.Z) end\n    mt.__index = function(t,k)\n        if k=="Magnitude" then return math.sqrt(t.X*t.X+t.Y*t.Y+t.Z*t.Z) end\n        if k=="Unit" then local m=math.sqrt(t.X*t.X+t.Y*t.Y+t.Z*t.Z); if m==0 then return vec3(0,0,0) end; return vec3(t.X/m,t.Y/m,t.Z/m) end\n        return rawget(t,k)\n    end\n    return setmetatable(o, mt)\nend\n\nlocal function cf(x,y,z)\n    local o = {X = x or 0, Y = y or 0, Z = z or 0}\n    local mt = {}\n    mt.__path = string.format("CFrame.new(%.4g, %.4g, %.4g)", o.X, o.Y, o.Z)\n    mt.__tostring = function() return mt.__path end\n    mt.__add = function(a,b) return cf(a.X+(b.X or 0),a.Y+(b.Y or 0),a.Z+(b.Z or 0)) end\n    mt.__mul = function(a,b) if type(b)=="table" and b.X then return cf(a.X+b.X,a.Y+b.Y,a.Z+b.Z) end return a end\n    mt.__index = function(t,k)\n        if k=="Position" or k=="p" then return vec3(t.X,t.Y,t.Z) end\n        if k=="LookVector" then return vec3(0,0,-1) end\n        if k=="RightVector" then return vec3(1,0,0) end\n        if k=="UpVector" then return vec3(0,1,0) end\n        return rawget(t,k)\n    end\n    return setmetatable(o, mt)\nend\n\nlocal NUM_KEYS = {\n    Health=100, MaxHealth=100, WalkSpeed=16, JumpPower=50, JumpHeight=7.2,\n    Transparency=0, BackgroundTransparency=0, TextSize=14, ZIndex=1,\n    LayoutOrder=0, Rotation=0, UserId=1, Volume=1, PlaybackSpeed=1,\n}\n\nlocal function make_tracer(path)\n    local props = {}\n    local obj = {}\n    local mt = { __path = path }\n    mt.__tostring = function() return path end\n    mt.__len = function() return 2 end\n    mt.__call = function(self, ...)\n        local n = select("#", ...)\n        local args = {...}\n        local as = {}\n        for i=1,n do as[i] = fmt_arg(args[i]) end\n        local is_hb = path:find("Heartbeat") or path:find("RenderStepped")\n        if is_hb then\n            _hb = _hb + 1\n            if _hb > _HB_MAX then return make_tracer(path .. "_ret") end\n        end\n        T(path .. "(" .. table.concat(as, ", ") .. ")")\n\n        if path:match("GetService$") and type(args[1]) == "string" then\n            return make_tracer("game.GetService(" .. args[1] .. ")")\n        end\n        if path == "Instance.new" or path:find("Instance%.new") then\n            local cls = args[1]\n            if type(cls) ~= "string" and type(args[2]) == "string" then cls = args[2] end\n            cls = tostring(cls or "?")\n            _inst_n = _inst_n + 1\n            local inst = make_tracer("Instance<" .. cls .. "#" .. _inst_n .. ">")\n            return inst\n        end\n        if path:find("WaitForChild") or path:find("FindFirstChild") or path:find("FindFirstChildOfClass") or path:find("FindFirstChildWhichIsA") then\n            return make_tracer(path_of(self) .. "[" .. tostring(args[1] or "?") .. "]")\n        end\n        if path:find("GetPlayers") then\n            local list = { make_tracer("Player1"), make_tracer("Player2") }\n            setmetatable(list, {\n                __path = "GetPlayers()",\n                __len = function() return 2 end,\n                __index = function(_,k)\n                    if type(k)=="number" then return list[k] or make_tracer("Player["..k.."]") end\n                    return make_tracer("GetPlayers()."..tostring(k))\n                end,\n            })\n            return list\n        end\n        if path:find("GetChildren") or path:find("GetDescendants") then\n            return { make_tracer(path_of(self)..".C1"), make_tracer(path_of(self)..".C2") }\n        end\n        if path:find("IsA") then return true end\n        if path:find("fromRGB") or path:find("fromHSV") then\n            return make_tracer("Color3(" .. table.concat(as, ",") .. ")")\n        end\n        if path:find("UDim2%.new") or path == "UDim2.new" then\n            return make_tracer("UDim2(" .. table.concat(as, ",") .. ")")\n        end\n        if path:find("UDim%.new") or path == "UDim.new" then\n            return make_tracer("UDim(" .. table.concat(as, ",") .. ")")\n        end\n        if path:find("Vector3%.new") or path == "Vector3.new" then\n            return vec3(tonumber(args[1]) or 0, tonumber(args[2]) or 0, tonumber(args[3]) or 0)\n        end\n        if path:find("CFrame%.new") or path == "CFrame.new" then\n            return cf(tonumber(args[1]) or 0, tonumber(args[2]) or 0, tonumber(args[3]) or 0)\n        end\n        if path:find("HttpGet") or path:find("HttpPost") then\n            T("HTTP " .. tostring(args[1]))\n            return "--http-body"\n        end\n        if path:find("GetState") then return make_tracer("Enum.HumanoidStateType.Running") end\n        return make_tracer(path .. "_ret")\n    end\n    mt.__index = function(t, k)\n        local key = tostring(k)\n        if props[key] ~= nil then return props[key] end\n        if NUM_KEYS[key] ~= nil then return NUM_KEYS[key] end\n        if key == "Position" then return vec3(0,5,0) end\n        if key == "Size" then return vec3(2,2,1) end\n        if key == "CFrame" then return cf(0,5,0) end\n        if key == "Velocity" or key == "AssemblyLinearVelocity" then return vec3(0,0,0) end\n        if key == "LookVector" then return vec3(0,0,-1) end\n        if key == "Character" then return make_tracer(path .. ".Character") end\n        if key == "LocalPlayer" then return make_tracer(path .. ".LocalPlayer") end\n        if key == "Humanoid" then return make_tracer(path .. ".Humanoid") end\n        if key == "HumanoidRootPart" then return make_tracer(path .. ".HumanoidRootPart") end\n        if key == "Parent" then return make_tracer(path .. ".Parent") end\n        if key == "Animation" then return make_tracer(path .. ".Animation") end\n        if key == "AnimationId" then return "rbxassetid://0" end\n        if key == "Connect" or key == "connect" or key == "Once" then\n            return function(ev, fn)\n                T(path .. ":Connect()")\n                if type(fn) == "function" then\n                    if path:find("Heartbeat") or path:find("RenderStepped") then\n                        if _hb < _HB_MAX then\n                            _hb = _hb + 1\n                            local ok, err = pcall(fn, 0.016)\n                            if not ok then T("HANDLER_ERR " .. tostring(err):sub(1,160)) end\n                        end\n                    else\n                        local ok, err = pcall(fn, make_tracer(path .. ":arg"))\n                        if not ok then T("HANDLER_ERR " .. tostring(err):sub(1,160)) end\n                    end\n                end\n                return make_tracer("Connection")\n            end\n        end\n        if key == "Wait" then\n            return function() return 0.016 end\n        end\n        if key == "TweenPosition" or key == "TweenSize" or key == "Play" or key == "Stop" or key == "Destroy" or key == "FireServer" or key == "InvokeServer" or key == "ChangeState" or key == "Move" or key == "MoveTo" or key == "GetState" then\n            return function(self2, ...)\n                local n = select("#", ...)\n                local args = {...}\n                local as = {}\n                for i=1,n do as[i] = fmt_arg(args[i]) end\n                T(path .. "." .. key .. "(" .. table.concat(as, ", ") .. ")")\n                if key == "GetState" then return make_tracer("Enum.HumanoidStateType.Running") end\n                return make_tracer("Ret")\n            end\n        end\n        if key == "GetPropertyChangedSignal" then\n            return function(_, name) return make_tracer(path .. ".Signal[" .. tostring(name) .. "]") end\n        end\n        if _hb <= _HB_MAX then\n            T(path .. "." .. key)\n        end\n        return make_tracer(path .. "." .. key)\n    end\n    mt.__newindex = function(t, k, v)\n        props[tostring(k)] = v\n        T(path .. "." .. tostring(k) .. " = " .. fmt_arg(v))\n    end\n    for _, op in ipairs({"__add","__sub","__mul","__div","__mod","__pow","__unm","__lt","__le","__eq","__concat"}) do\n        mt[op] = function(a, b)\n            local na = type(a)=="number" and a or 0\n            local nb = type(b)=="number" and b or 0\n            if op=="__add" then return na+nb end\n            if op=="__sub" then return na-nb end\n            if op=="__mul" then return na*nb end\n            if op=="__div" then return nb~=0 and na/nb or 0 end\n            if op=="__mod" then return nb~=0 and na%nb or 0 end\n            if op=="__pow" then return na^nb end\n            if op=="__unm" then return -na end\n            if op=="__lt" then return na<nb end\n            if op=="__le" then return na<=nb end\n            if op=="__eq" then return rawequal(a,b) end\n            if op=="__concat" then return tostring(a)..tostring(b) end\n            return 0\n        end\n    end\n    return setmetatable(obj, mt)\nend\n\n_G.print = function(...)\n    local args = {...}\n    local strs = {}\n    for i=1, select("#", ...) do strs[i] = tostring(args[i]) end\n    _orig_print("[P]" .. table.concat(strs, "\\t"))\nend\n_G.warn = _G.print\n\nlocal rl = loadstring or load\n_G.loadstring = function(src, ...)\n    if type(src) == "string" and #src > 8 then\n        T("LOADSTRING len=" .. #src)\n    end\n    if type(src) ~= "string" and type(src) ~= "function" then return nil, "bad" end\n    return rl(src, ...)\nend\n_G.load = _G.loadstring\n\n_G.Instance = {\n    new = function(cls, parent)\n        _inst_n = _inst_n + 1\n        local name = tostring(cls)\n        T(\'Instance.new("\' .. name .. \'")\')\n        local inst = make_tracer("Instance<" .. name .. "#" .. _inst_n .. ">")\n        if parent ~= nil then\n            T("Instance<" .. name .. "#" .. _inst_n .. ">.Parent = " .. path_of(parent))\n        end\n        return inst\n    end\n}\nsetmetatable(_G.Instance, { __path = "Instance", __index = function(_,k) return make_tracer("Instance." .. tostring(k)) end })\n\n_G.game = make_tracer("game")\n_G.workspace = make_tracer("workspace")\n_G.Workspace = _G.workspace\n_G.Enum = make_tracer("Enum")\n_G.Color3 = make_tracer("Color3")\n_G.UDim2 = make_tracer("UDim2")\n_G.UDim = make_tracer("UDim")\n_G.Vector3 = { new = function(x,y,z) T("Vector3.new("..tostring(x)..", "..tostring(y)..", "..tostring(z)..")"); return vec3(x,y,z) end }\nsetmetatable(_G.Vector3, { __path="Vector3", __index=function(_,k) return make_tracer("Vector3."..tostring(k)) end })\n_G.Vector2 = make_tracer("Vector2")\n_G.CFrame = { new = function(x,y,z) T("CFrame.new("..tostring(x)..", "..tostring(y)..", "..tostring(z)..")"); return cf(x,y,z) end }\nsetmetatable(_G.CFrame, { __path="CFrame", __index=function(_,k) return make_tracer("CFrame."..tostring(k)) end })\n_G.TweenInfo = make_tracer("TweenInfo")\n_G.BrickColor = make_tracer("BrickColor")\n_G.Ray = make_tracer("Ray")\n_G.Region3 = make_tracer("Region3")\n_G.NumberRange = make_tracer("NumberRange")\n_G.NumberSequence = make_tracer("NumberSequence")\n_G.ColorSequence = make_tracer("ColorSequence")\n_G.Rect = make_tracer("Rect")\n_G.Font = make_tracer("Font")\n_G.RaycastParams = make_tracer("RaycastParams")\n_G.PhysicalProperties = make_tracer("PhysicalProperties")\n_G.shared = {}\n_G.script = make_tracer("script")\n_G._G = _G\n\n_G.task = {\n    wait = function(n) T("task.wait(" .. tostring(n) .. ")") end,\n    spawn = function(fn)\n        T("task.spawn()")\n        if type(fn)=="function" then local ok,e=pcall(fn); if not ok then T("task.spawn err: "..tostring(e):sub(1,160)) end end\n    end,\n    defer = function(fn) if type(fn)=="function" then pcall(fn) end end,\n    delay = function(n, fn) T("task.delay("..tostring(n)..")"); if type(fn)=="function" then pcall(fn) end end,\n}\n_G.wait = function(n) T("wait("..tostring(n)..")") end\n_G.spawn = function(fn) if type(fn)=="function" then pcall(fn) end end\n_G.tick = function() return os.clock() end\n_G.time = function() return os.clock() end\n_G.require = function(m) T("require("..tostring(m)..")"); return make_tracer("Module") end\n\n_orig_print("[STUBS_OK]")\n'
 
     @staticmethod
     def _get_tracer_lua() -> str:
@@ -2898,7 +2978,7 @@ class WeAreDevDeobfuscator:
                    (opcode_strings and len(opcode_strings) > 0) or
                    (cff_blocks and len(cff_blocks) > 0))
         if has_any:
-            lines.append('-- [[ Deobfuscated by Lua Deobfuscator Bot v5.5 ]]')
+            lines.append('-- [[ Deobfuscated by Lua Deobfuscator Bot v5.6 ]]')
             lines.append('-- Method: P-table + VM trace + CFF blocks + enhanced tracer + opcode analysis + disassembler')
             lines.append(f'-- P-table: {len(P_decoded)} entries, {len(meaningful)} meaningful strings')
             lines.append('')
@@ -3092,6 +3172,21 @@ class LuaDeobfuscator:
         Deobfuscate Lua code.
         Returns (obfuscator_name, recovered_source, metadata)
         """
+        # v12: auto-peel simple "hub"-style wrapper layers (byte complement/
+        # XOR/shift encoding) before detection, so a WeAreDevs (etc.) payload
+        # re-wrapped by a redistribution hub is seen for what it really is
+        # instead of reporting "Unknown".
+        code, peeled_layers = peel_wrapper_layers(code, verbose=self.verbose)
+        if self.verbose and peeled_layers:
+            print(f"[*] Auto-unwrapped {peeled_layers} hub-style layer(s)")
+
+        # v12: fix Luau-only compound-assignment syntax (`+=` etc.) that
+        # would otherwise fail to even parse under lupa's Lua engine
+        # (LuaJIT/PUC-Lua do not support this Luau-only syntax).
+        code, n_transpiled = transpile_luau_compound_ops(code)
+        if self.verbose and n_transpiled:
+            print(f"[*] Transpiled {n_transpiled} Luau compound-assignment op(s) to standard Lua")
+
         detected = ObfuscatorDetector.detect(code)
         if self.verbose:
             print(f"[*] File: {name}")
@@ -3169,7 +3264,9 @@ import threading as _threading
 import discord
 from discord.ext import commands
 from flask import Flask
+import asyncio
 import aiohttp
+import requests
 
 TOKEN = os.environ.get("DISCORD_TOKEN")
 COMMAND_PREFIX = "."
@@ -3183,7 +3280,7 @@ def _health():
     return "Bot is running."
 
 def _run_keep_alive():
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.environ.get("PORT", 8080))
     keep_alive_app.run(host="0.0.0.0", port=port)
 
 def start_keep_alive():
@@ -3194,6 +3291,188 @@ intents.message_content = True
 bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents, help_command=None)
 
 deobfuscator = LuaDeobfuscator(verbose=False)
+
+
+WAN_BANNER = """--[[ 
+█░░░█ █▀█ █▄░█
+▀▄▀▄▀ █▀█ █░▀█
+
+   WAN DEOBFUSCATOR 
+  
+]]
+"""
+
+
+def upload_to_pastefy(content: str, title: str = "WAN DEOBFUSCATOR") -> Optional[str]:
+    url = "https://pastefy.app/api/v2/paste"
+    payload = {
+        "title": title,
+        "content": content,
+        "type": "PASTE",
+        "visibility": "UNLISTED",
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+        paste_obj = data.get("paste", {})
+        paste_id = paste_obj.get("id") if isinstance(paste_obj, dict) else data.get("id")
+        if paste_id:
+            return f"https://pastefy.app/{paste_id}/raw"
+    except Exception as e:
+        print(f"[!] Pastefy error: {e}")
+    return None
+
+
+def upload_to_rubis(content: str, title: str = "WAN DEOBFUSCATOR") -> Optional[str]:
+    """Upload to Rubis; return only the raw URL."""
+    url = "https://api.rubis.app/v2/scrap"
+    params = {"public": "true", "accessKey": "true", "title": title}
+    headers = {"accept": "application/json", "Content-Type": "text/plain"}
+    try:
+        response = requests.post(
+            url, params=params, headers=headers,
+            data=content.encode("utf-8"), timeout=60,
+        )
+        response.raise_for_status()
+        data = response.json()
+        raw = data.get("raw")
+        if isinstance(raw, str) and raw.startswith("http"):
+            return raw
+        scrap_id = data.get("scrapID")
+        if scrap_id:
+            return f"https://api.rubis.app/v2/scrap/{scrap_id}/raw"
+    except Exception as e:
+        print(f"[!] Rubis error: {e}")
+    return None
+
+
+def with_wan_banner(source: str) -> str:
+    s = (source or "").lstrip()
+    if s.startswith("--[[") and "WAN DEOBFUSCATOR" in s[:200]:
+        return source
+    return WAN_BANNER + "\n" + (source or "")
+
+
+def _is_url(text: str) -> bool:
+    text = (text or "").strip().strip("<>")
+    return bool(re.match(
+        r'^(?:http|ftp)s?://'
+        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+(?:[A-Z]{2,6}\.?|[A-Z0-9-]{2,}\.?)|'
+        r'localhost|'
+        r'\d{1,3}(?:\.\d{1,3}){3}|'
+        r'\[?[A-F0-9]*:[A-F0-9:]+\]?)'
+        r'(?::\d+)?'
+        r'(?:/?|[/?]\S+)$',
+        text, re.IGNORECASE,
+    ))
+
+
+def _normalize_raw_url(link: str) -> str:
+    link = link.strip().strip("<>")
+    if "github.com" in link and "/blob/" in link:
+        link = link.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+    if "gist.github.com/" in link and "gist.githubusercontent.com" not in link:
+        link = link.replace("gist.github.com/", "gist.githubusercontent.com/")
+        if not link.rstrip("/").endswith("/raw"):
+            link = link.rstrip("/") + "/raw"
+    m = re.match(r'https?://(?:www\.)?pastebin\.com/(?!raw/)([A-Za-z0-9]+)/?$', link)
+    if m:
+        link = f"https://pastebin.com/raw/{m.group(1)}"
+    return link
+
+
+def _clean_url_arg(text: str) -> str:
+    """Strip Discord markdown / embeds noise so .l matches .get URL handling."""
+    if not text:
+        return ""
+    t = text.strip()
+    # Discord often wraps links as <https://...>
+    t = t.strip("<>").strip()
+    # If user pasted extra text, pull first http(s) URL
+    m = re.search(r'https?://[^\s<>]+', t)
+    if m:
+        t = m.group(0)
+    # trailing punctuation from chat
+    t = t.rstrip(').,;]\'"')
+    return t.strip()
+
+
+async def _http_get_text(url: str) -> str:
+    """Download full body as text — same reliability as simple .get sample."""
+    url = _normalize_raw_url(_clean_url_arg(url) if url else url)
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise ValueError("That doesn't look like a valid link.")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+    }
+    timeout = aiohttp.ClientTimeout(total=180, connect=30, sock_read=120)
+    try:
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(url, timeout=timeout, allow_redirects=True) as resp:
+                if resp.status != 200:
+                    raise ValueError(f"Link returned HTTP {resp.status}.")
+                # Full body — do NOT truncate
+                text = await resp.text(errors="replace")
+    except aiohttp.ClientError as e:
+        raise ValueError(f"Failed to download link: {type(e).__name__}: {e}") from e
+    except asyncio.TimeoutError as e:
+        raise ValueError("Link download timed out (180s).") from e
+    if text is None:
+        raise ValueError("Link returned empty body.")
+    if len(text.encode("utf-8", errors="replace")) > MAX_FETCH_BYTES:
+        raise ValueError(f"File too large. Max is {MAX_FETCH_BYTES:,} bytes.")
+    return text
+
+
+async def _send_text_content(ctx, content: str, filename: str = "code.txt", edit_msg=None):
+    """Send full text: code block if short, otherwise Discord file (BytesIO — no truncation)."""
+    if content is None:
+        content = ""
+    if len(content) <= DISCORD_MSG_LIMIT:
+        body = f"```\n{content}\n```"
+        if edit_msg is not None:
+            await edit_msg.edit(content=body)
+        else:
+            await ctx.reply(body)
+        return
+    data = io.BytesIO(content.encode("utf-8", errors="replace"))
+    file = discord.File(data, filename=filename)
+    if edit_msg is not None:
+        await edit_msg.edit(content=f"Fetched **{len(content):,}** chars:")
+        await ctx.send(file=file)
+    else:
+        await ctx.reply(file=file)
+
+
+
+class UploadChoiceView(discord.ui.View):
+    def __init__(self, content: str, title: str = "WAN DEOBFUSCATOR", timeout: float = 120):
+        super().__init__(timeout=timeout)
+        self.content = content
+        self.title = title
+
+    @discord.ui.button(label="Pastefy", style=discord.ButtonStyle.danger)
+    async def pastefy_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        link = await asyncio.to_thread(upload_to_pastefy, self.content, self.title)
+        if link:
+            await interaction.followup.send(f"[click]({link})", ephemeral=True)
+        else:
+            await interaction.followup.send("Upload Pastefy failed.", ephemeral=True)
+
+    @discord.ui.button(label="Rubis", style=discord.ButtonStyle.success)
+    async def rubis_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        link = await asyncio.to_thread(upload_to_rubis, self.content, self.title)
+        if link:
+            await interaction.followup.send(f"[click]({link})", ephemeral=True)
+        else:
+            await interaction.followup.send("Upload Rubis failed.", ephemeral=True)
+
+
 
 
 def strip_lua_comments(source: str) -> str:
@@ -3212,6 +3491,18 @@ def strip_lua_comments(source: str) -> str:
 
 
 async def _fetch_source(ctx: commands.Context, link: Optional[str]):
+    """Load script from attachment or link (.l / .d / .upload). Same download path as .get."""
+    # Prefer explicit link argument; attachment only when no link given
+    if link and str(link).strip():
+        link = _clean_url_arg(link)
+        if not (link.startswith("http://") or link.startswith("https://")):
+            raise ValueError("That doesn't look like a valid link.")
+        text = await _http_get_text(link)
+        filename = _normalize_raw_url(link).rsplit("/", 1)[-1].split("?")[0] or "link.lua"
+        if not filename.lower().endswith((".lua", ".txt")):
+            filename = filename + ".lua"
+        return filename, text
+
     if ctx.message.attachments:
         attachment = ctx.message.attachments[0]
         if not attachment.filename.lower().endswith((".lua", ".txt")):
@@ -3219,22 +3510,8 @@ async def _fetch_source(ctx: commands.Context, link: Optional[str]):
         raw = await attachment.read()
         return attachment.filename, raw.decode("utf-8", errors="replace")
 
-    if link:
-        if not (link.startswith("http://") or link.startswith("https://")):
-            raise ValueError("That doesn't look like a valid link.")
-        # v10: no hard size cap anymore -- some obfuscated scripts (WeAreDev
-        # VM dumps, chunked/merged payloads, etc.) legitimately run past 5MB.
-        # Still stream with a generous timeout so a slow/huge/misbehaving
-        # link can't hang the bot forever.
-        async with aiohttp.ClientSession() as session:
-            async with session.get(link, timeout=aiohttp.ClientTimeout(total=120)) as resp:
-                if resp.status != 200:
-                    raise ValueError(f"Link returned HTTP {resp.status}.")
-                data = await resp.read()
-        filename = link.rsplit("/", 1)[-1] or "link.lua"
-        return filename, data.decode("utf-8", errors="replace")
+    raise ValueError("Attach a `.lua`/`.txt` file, or give a link: `.l <link>`")
 
-    raise ValueError("Attach a `.lua`/`.txt` file, or give a link: `.l <link>")
 
 
 @bot.event
@@ -3243,7 +3520,7 @@ async def on_ready():
 
 
 @bot.command(name="l")
-async def l_cmd(ctx: commands.Context, link: Optional[str] = None):
+async def l_cmd(ctx: commands.Context, *, link: Optional[str] = None):
     try:
         filename, code = await _fetch_source(ctx, link)
     except ValueError as e:
@@ -3255,10 +3532,19 @@ async def l_cmd(ctx: commands.Context, link: Optional[str] = None):
     try:
         obf_name, source, meta = deobfuscator.deobfuscate(code, filename)
         cleaned = strip_lua_comments(source)
+        cleaned = with_wan_banner(cleaned)
 
         header = f"Obfuscator detected: **{obf_name}**\n"
 
-        if not cleaned.strip():
+        rubis_link = None
+        if cleaned.strip() and cleaned.strip() != WAN_BANNER.strip():
+            rubis_link = await asyncio.to_thread(
+                upload_to_rubis, cleaned, f"WAN DEOBF — {filename}"
+            )
+        if rubis_link:
+            header += f"<:rubis:1546171167281254550>: [click]({rubis_link})\n"
+
+        if not cleaned.strip() or cleaned.strip() == WAN_BANNER.strip():
             reason = source.strip() or "No source could be recovered."
             await status_msg.edit(
                 content=(
@@ -3273,27 +3559,17 @@ async def l_cmd(ctx: commands.Context, link: Optional[str] = None):
         if len(cleaned) <= DISCORD_MSG_LIMIT:
             await status_msg.edit(content=f"{header}```lua\n{cleaned}\n```")
         else:
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".lua", delete=False, encoding="utf-8"
-            ) as f:
-                f.write(cleaned)
-                tmp_path = f.name
-
-            await status_msg.edit(content=header)
-            try:
-                await ctx.send(file=discord.File(tmp_path, filename="deobfuscated.lua"))
-            finally:
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
+            await status_msg.edit(content=header + f"({len(cleaned):,} chars)")
+            data = io.BytesIO(cleaned.encode("utf-8", errors="replace"))
+            await ctx.send(file=discord.File(data, filename="deobfuscated.lua"))
 
     except Exception as e:
         await status_msg.edit(content=f"Error: `{e}`")
 
 
+
 @bot.command(name="d")
-async def d_cmd(ctx: commands.Context, link: Optional[str] = None):
+async def d_cmd(ctx: commands.Context, *, link: Optional[str] = None):
     """Disassemble WeAreDev VM bytecode."""
     try:
         filename, code = await _fetch_source(ctx, link)
@@ -3330,12 +3606,67 @@ async def d_cmd(ctx: commands.Context, link: Optional[str] = None):
         await status_msg.edit(content=f"Disassembly error: `{e}`")
 
 
+
+@bot.command(name="upload")
+async def upload_cmd(ctx: commands.Context, *, link: Optional[str] = None):
+    """Upload attachment or link. Choose Pastefy (red) or Rubis (green)."""
+    try:
+        if ctx.message.attachments or link:
+            filename, code = await _fetch_source(ctx, link)
+        else:
+            await ctx.reply(
+                "Attach a `.lua`/`.txt` file or give a link, then pick a host:\n"
+                "`.upload` + attach  |  `.upload <url>`"
+            )
+            return
+    except ValueError as e:
+        await ctx.reply(str(e))
+        return
+
+    if not code.strip():
+        await ctx.reply("Empty content.")
+        return
+
+    view = UploadChoiceView(code, title=f"WAN UPLOAD — {filename}")
+    await ctx.reply(
+        f"**Upload** `{filename}` ({len(code):,} chars)\n"
+        f" host: **Pastefy**  **Rubis**",
+        view=view,
+    )
+
+
+@bot.command(name="get")
+async def get_cmd(ctx: commands.Context, *, content: str = None):
+    """Fetch full raw content from a URL, or echo text. Never truncates source."""
+    if content is None or not str(content).strip():
+        await ctx.reply("Usage: `.get <url>` or `.get <text>`")
+        return
+    raw_arg = content.strip()
+    # Extract URL if present (Discord may wrap <url>)
+    url_candidate = _clean_url_arg(raw_arg) if ("http://" in raw_arg or "https://" in raw_arg) else raw_arg
+    try:
+        if _is_url(url_candidate) or url_candidate.startswith("http://") or url_candidate.startswith("https://"):
+            status = await ctx.reply(f"Fetching `{url_candidate[:80]}`...")
+            try:
+                text = await _http_get_text(url_candidate)
+            except ValueError as e:
+                await status.edit(content=str(e))
+                return
+            # Always send FULL body
+            await _send_text_content(ctx, text, filename="code.txt", edit_msg=status)
+        else:
+            await _send_text_content(ctx, raw_arg, filename="code.txt")
+    except Exception as e:
+        await ctx.reply(f"Error: `{e}`")
+
+
+
 bot.remove_command('help')
 
 @bot.command(name="help")
 async def help_cmd(ctx: commands.Context):
     embed = discord.Embed(
-        title="Lua Deobfuscator Bot v5.5",
+        title="Lua Deobfuscator",
         description="Commands:",
         color=0x5865F2,
     )
@@ -3346,7 +3677,17 @@ async def help_cmd(ctx: commands.Context):
     )
     embed.add_field(
         name=".l <link>",
-        value="`.l https://example.com/script.lua` -- fetches and deobfuscates a script from a direct link.",
+        value="`.l https://raw.../script.lua",
+        inline=False,
+    )
+    embed.add_field(
+        name=".get <url|text>",
+        value="Fetch raw content from a URL or echo text.",
+        inline=False,
+    )
+    embed.add_field(
+        name=".upload",
+        value="Upload content — **<:paterfy:1546171965897973820>Pastefy** (red) or **<:rubis:1546171167281254550>Rubis** (green). Returns `[click](raw_url)`.",
         inline=False,
     )
     embed.add_field(
@@ -3356,7 +3697,7 @@ async def help_cmd(ctx: commands.Context):
     )
     embed.add_field(
         name="Supported obfuscators",
-        value="WeAreDev (headerless detect + bytecode disassembler), IronBrew2, WAN OBFUSCATE, MoonSec V3, Clyde, AstroProtect, LuaObfuscator.com (Ferib), PSU, Luraph, Base64+Compress, Generic VM-based.",
+        value="<:wearedev:1539221658257064056> WeAreDev, IronBrew2, WAN OBFUSCATE.",
         inline=False,
     )
     embed.set_footer(text="Comments are stripped from the recovered source automatically.")
