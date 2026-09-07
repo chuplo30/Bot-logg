@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: wan-deobf-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt && curl -fsSL https://nodejs.org/dist/v20.18.0/node-v20.18.0-linux-x64.tar.xz -o /tmp/node.tar.xz && mkdir -p \[ HOME/node && tar -xJf /tmp/node.tar.xz -C \]HOME/node --strip-components=1 && (test -d Prometheus-Deobfuscator || git clone --depth 1 https://github.com/prostone4/Prometheus-Deobfuscator.git)
+    startCommand: export PATH="\[ HOME/node/bin: \]PATH" && export PROMETHEUS_DEOBF_DIR="\[ PWD/Prometheus-Deobfuscator" && python main.py
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: PORT
+        value: "8080"
