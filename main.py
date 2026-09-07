@@ -820,6 +820,7 @@ class MoonSecDeobfuscator:
         if entries:
             lines.append(f"-- Helper entries: {len(entries)}")
         lines.append("-- Use lupa to execute VM and recover source.")
+        lines.append("-- If you expected .NET Moonsec: check Render logs for [!] Moonsec external failed")
         return "\n".join(lines), {"method": "static analysis"}
 
 
@@ -3539,17 +3540,30 @@ class LuaDeobfuscator:
 
         # External tools first (Prometheus / Ironveil / LuaObfuscator / Moonsec / Luraph)
         try:
-            ext = run_external_deobf_for_detected(detected, code, verbose=self.verbose)
+            # Always verbose for MoonSec so Render logs show why dotnet path failed
+            ext_verbose = self.verbose or (
+                detected is not None and "moonsec" in detected.lower()
+            )
+            ext = run_external_deobf_for_detected(detected, code, verbose=ext_verbose)
             if ext:
                 source, method = ext
                 meta["method"] = method
                 obf_name = detected or method
-                if self.verbose:
-                    print(f"[+] External tool OK: {method}")
+                print(f"[+] External tool OK: {method}")
                 return obf_name, source, meta
+            else:
+                # Record diagnostics for Discord message
+                det_l = (detected or "").lower()
+                if "moonsec" in det_l:
+                    import shutil
+                    meta["external_error"] = (
+                        f"Moonsec external failed | dotnet={shutil.which('dotnet') or os.environ.get('DOTNET_ROOT')} "
+                        f"| project={_find_moonsec_project()} | dll={_find_moonsec_dll()} "
+                        f"| MOONSEC_DEOBF_DIR={os.environ.get('MOONSEC_DEOBF_DIR')}"
+                    )
+                    print(f"[!] {meta['external_error']}")
         except Exception as e:
-            if self.verbose:
-                print(f"[!] External tool error: {e}")
+            print(f"[!] External tool error: {e}")
             meta["external_error"] = str(e)
 
         for deobf_cls in self.DEOBFUSCATORS:
@@ -3902,11 +3916,17 @@ async def l_cmd(ctx: commands.Context, *, link: Optional[str] = None):
 
         if not cleaned.strip() or cleaned.strip() == WAN_BANNER.strip():
             reason = source.strip() or "No source could be recovered."
+            extra = ""
+            if meta.get("external_error"):
+                extra = f"\nExternal tool: `{meta['external_error'][:500]}`"
+            if meta.get("method"):
+                extra += f"\nFallback method: `{meta.get('method')}`"
             await status_msg.edit(
                 content=(
                     f"{header}Nothing left after stripping comments -- "
                     f"the deobfuscator itself didn't recover real source, "
                     f"it only returned notes:\n```\n{reason}\n```"
+                    f"{extra}"
                     f"{' (lupa not installed -- install it for VM execution)' if not deobfuscator.engine.available else ''}"
                 )
             )
