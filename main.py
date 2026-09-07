@@ -1667,8 +1667,30 @@ def _find_luaobf_entry() -> Optional[Path]:
     return None
 
 
+def _find_moonsec_project() -> Optional[Path]:
+    """Find MoonsecDeobfuscator.csproj"""
+    env = os.environ.get("MOONSEC_DEOBF_DIR")
+    roots = []
+    if env:
+        roots.append(Path(env))
+    d = _find_tool_dir(("MoonsecDeobfuscator",), ("tools", "MoonsecDeobfuscator"))
+    if d:
+        roots.append(d)
+    for root in roots:
+        for c in (
+            root / "MoonsecDeobfuscator.csproj",
+            root / "src" / "MoonsecDeobfuscator.csproj",
+        ):
+            if c.is_file():
+                return c
+        hits = list(root.glob("**/*.csproj"))
+        if hits:
+            return hits[0]
+    return None
+
+
 def _find_moonsec_dll() -> Optional[Path]:
-    """Find built MoonsecDeobfuscator dll (optional .NET)."""
+    """Find built MoonsecDeobfuscator.dll under bin/."""
     env = os.environ.get("MOONSEC_DEOBF_DIR")
     search_roots = []
     if env:
@@ -1679,229 +1701,42 @@ def _find_moonsec_dll() -> Optional[Path]:
     for root in search_roots:
         for pattern in (
             "**/MoonsecDeobfuscator.dll",
-            "**/bin/Release/**/MoonsecDeobfuscator.dll",
-            "**/bin/Debug/**/MoonsecDeobfuscator.dll",
+            "bin/Release/**/MoonsecDeobfuscator.dll",
+            "bin/Debug/**/MoonsecDeobfuscator.dll",
         ):
-            hits = list(root.glob(pattern))
+            hits = sorted(root.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
             if hits:
                 return hits[0]
     return None
 
 
-def _find_luauvmp() -> Optional[str]:
-    """luauvmp CLI on PATH or under cloned repo."""
-    import shutil
-    which = shutil.which("luauvmp")
-    if which:
-        return which
-    env = os.environ.get("LUAU_VMP_DIR")
-    roots = []
-    if env:
-        roots.append(Path(env))
-    d = _find_tool_dir(("luau-vmp-deobf",), ("tools", "luau-vmp-deobf"))
-    if d:
-        roots.append(d)
-    for root in roots:
-        for c in (
-            root / "luauvmp",
-            root / ".venv" / "bin" / "luauvmp",
-        ):
-            if c.is_file():
-                return str(c)
-    return None
-
-
-def _run_node_script(script: Path, args: list, timeout: int = 90, verbose: bool = False, cwd: Optional[Path] = None) -> Optional[str]:
-    """Run node script; prefer reading output file if last args look like -o out, else stdout."""
+def run_moonsec_deobf(code: str, timeout: int = 180, verbose: bool = False) -> Optional[str]:
+    """MoonSec V3 via `dotnet run --project` (preferred) or built DLL."""
     import shutil
     import subprocess
-    node = shutil.which("node")
-    if not node:
-        if verbose:
-            print("  [!] node not found")
-        return None
-    if not script or not script.is_file():
-        return None
-    cmd = [node, str(script)] + list(args)
-    if verbose:
-        print(f"  [*] node: {' '.join(cmd)}")
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=str(cwd or script.parent),
-        )
-    except subprocess.TimeoutExpired:
-        if verbose:
-            print("  [!] node tool timed out")
-        return None
-    except Exception as e:
-        if verbose:
-            print(f"  [!] node tool error: {e}")
-        return None
-    # Heuristic: if args contain an existing output path after -o/--out, read it
-    out_path = None
-    for i, a in enumerate(args):
-        if a in ("-o", "--out") and i + 1 < len(args):
-            out_path = Path(args[i + 1])
-            break
-    if out_path and out_path.is_file():
-        try:
-            text = out_path.read_text(encoding="utf-8", errors="replace")
-            if text.strip():
-                return text
-        except OSError:
-            pass
-    # Else stdout (some tools print source there)
-    out = (proc.stdout or "").strip()
-    # Strip ANSI
-    out = re.sub(r"\x1b\[[0-9;]*m", "", out)
-    if out and len(out) > 20 and "Missing input" not in out:
-        return out
-    if proc.returncode != 0 and verbose:
-        err = (proc.stderr or "")[:300]
-        print(f"  [!] node exit {proc.returncode}: {err}")
-    return None
-
-
-def run_prometheus_deobf(code: str, timeout: int = 90, verbose: bool = False) -> Optional[str]:
-    import shutil
-    import subprocess
-    node = shutil.which("node")
-    if not node:
-        if verbose:
-            print("  [!] Prometheus: node not found")
-        return None
-    root = _find_prometheus_dir()
-    if root is None:
-        if verbose:
-            print("  [!] Prometheus: not found (set PROMETHEUS_DEOBF_DIR)")
-        return None
-    pdeobf = root / "bin" / "pdeobf.js"
-    if not pdeobf.is_file():
-        return None
-    tmp_in = tmp_out = None
-    try:
-        fd_in, tmp_in = tempfile.mkstemp(suffix=".lua", prefix="wad_in_")
-        os.close(fd_in)
-        fd_out, tmp_out = tempfile.mkstemp(suffix=".lua", prefix="wad_out_")
-        os.close(fd_out)
-        Path(tmp_in).write_text(code, encoding="utf-8", errors="replace")
-        cmd = [node, str(pdeobf), tmp_in, "-o", tmp_out]
-        if verbose:
-            print(f"  [*] Prometheus: {' '.join(cmd)}")
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(root))
-        out = Path(tmp_out).read_text(encoding="utf-8", errors="replace") if Path(tmp_out).is_file() else ""
-        if not out.strip() or len(out.strip()) < 20:
-            if verbose:
-                print(f"  [!] Prometheus empty (exit {proc.returncode})")
-            return None
-        if verbose:
-            print(f"  [+] Prometheus recovered {len(out):,} chars")
-        return out
-    except Exception as e:
-        if verbose:
-            print(f"  [!] Prometheus error: {e}")
-        return None
-    finally:
-        for p in (tmp_in, tmp_out):
-            if p and os.path.exists(p):
-                try:
-                    os.unlink(p)
-                except OSError:
-                    pass
-
-
-def run_ironveil_deobf(code: str, timeout: int = 90, verbose: bool = False) -> Optional[str]:
-    entry = _find_ironveil_entry()
-    if not entry:
-        if verbose:
-            print("  [!] Ironveil: not found (set IRONVEIL_DEOBF_DIR)")
-        return None
-    tmp_in = tmp_out = None
-    try:
-        fd_in, tmp_in = tempfile.mkstemp(suffix=".lua", prefix="iv_in_")
-        os.close(fd_in)
-        fd_out, tmp_out = tempfile.mkstemp(suffix=".lua", prefix="iv_out_")
-        os.close(fd_out)
-        Path(tmp_in).write_text(code, encoding="utf-8", errors="replace")
-        # CLI: node index.js input.lua output.lua
-        out = _run_node_script(entry, [tmp_in, tmp_out], timeout=timeout, verbose=verbose, cwd=entry.parent)
-        if out and len(out.strip()) > 20:
-            if verbose:
-                print(f"  [+] Ironveil recovered {len(out):,} chars")
-            return out
-        # fallback read file
-        if Path(tmp_out).is_file():
-            t = Path(tmp_out).read_text(encoding="utf-8", errors="replace")
-            if t.strip():
-                return t
-        return None
-    except Exception as e:
-        if verbose:
-            print(f"  [!] Ironveil error: {e}")
-        return None
-    finally:
-        for p in (tmp_in, tmp_out):
-            if p and os.path.exists(p):
-                try:
-                    os.unlink(p)
-                except OSError:
-                    pass
-
-
-def run_luaobfuscator_deobf(code: str, timeout: int = 90, verbose: bool = False) -> Optional[str]:
-    entry = _find_luaobf_entry()
-    if not entry:
-        if verbose:
-            print("  [!] LuaObfuscator tool: not found (set LUAOBF_DEOBF_DIR)")
-        return None
-    tmp_in = tmp_out = None
-    try:
-        fd_in, tmp_in = tempfile.mkstemp(suffix=".lua", prefix="lo_in_")
-        os.close(fd_in)
-        fd_out, tmp_out = tempfile.mkstemp(suffix=".lua", prefix="lo_out_")
-        os.close(fd_out)
-        Path(tmp_in).write_text(code, encoding="utf-8", errors="replace")
-        # node index.js file.lua --out out.lua --stdout
-        out = _run_node_script(
-            entry, [tmp_in, "--out", tmp_out, "--stdout"],
-            timeout=timeout, verbose=verbose, cwd=entry.parent,
-        )
-        if out and len(out.strip()) > 20:
-            if verbose:
-                print(f"  [+] LuaObfuscator tool recovered {len(out):,} chars")
-            return out
-        if Path(tmp_out).is_file():
-            t = Path(tmp_out).read_text(encoding="utf-8", errors="replace")
-            if t.strip():
-                return t
-        return None
-    except Exception as e:
-        if verbose:
-            print(f"  [!] LuaObfuscator tool error: {e}")
-        return None
-    finally:
-        for p in (tmp_in, tmp_out):
-            if p and os.path.exists(p):
-                try:
-                    os.unlink(p)
-                except OSError:
-                    pass
-
-
-def run_moonsec_deobf(code: str, timeout: int = 120, verbose: bool = False) -> Optional[str]:
-    """Optional: MoonSec V3 via dotnet. Prefer -dis (readable disassembly) over raw bytecode."""
-    import shutil
-    import subprocess
-    dll = _find_moonsec_dll()
     dotnet = shutil.which("dotnet")
-    if not dll or not dotnet:
+    if not dotnet:
+        # common install locations from dotnet-install.sh
+        for cand in (
+            Path.home() / ".dotnet" / "dotnet",
+            Path("/root/.dotnet/dotnet"),
+            Path(os.environ.get("DOTNET_ROOT", "")) / "dotnet",
+        ):
+            if cand.is_file():
+                dotnet = str(cand)
+                break
+    if not dotnet:
         if verbose:
-            print("  [!] Moonsec: need dotnet + built MoonsecDeobfuscator.dll")
+            print("  [!] Moonsec: dotnet not found (install .NET 9 + set PATH)")
         return None
+
+    proj = _find_moonsec_project()
+    dll = _find_moonsec_dll()
+    if not proj and not dll:
+        if verbose:
+            print("  [!] Moonsec: project/dll not found (set MOONSEC_DEOBF_DIR)")
+        return None
+
     tmp_in = tmp_out = None
     try:
         fd_in, tmp_in = tempfile.mkstemp(suffix=".lua", prefix="ms_in_")
@@ -1909,19 +1744,60 @@ def run_moonsec_deobf(code: str, timeout: int = 120, verbose: bool = False) -> O
         fd_out, tmp_out = tempfile.mkstemp(suffix=".txt", prefix="ms_out_")
         os.close(fd_out)
         Path(tmp_in).write_text(code, encoding="utf-8", errors="replace")
-        # -dis for human-readable disassembly
-        cmd = [dotnet, str(dll), "-dis", "-i", tmp_in, "-o", tmp_out]
+
+        env = os.environ.copy()
+        env.setdefault("DOTNET_ROOT", str(Path.home() / ".dotnet"))
+        env["PATH"] = env.get("DOTNET_ROOT", "") + os.pathsep + env.get("PATH", "")
+        env["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1"
+        env["DOTNET_NOLOGO"] = "1"
+
+        cmds = []
+        if proj:
+            # dotnet run --project X.csproj -c Release -- -dis -i in -o out
+            cmds.append([
+                dotnet, "run", "--project", str(proj), "-c", "Release", "--no-build",
+                "--", "-dis", "-i", tmp_in, "-o", tmp_out,
+            ])
+            # if --no-build fails (never built), allow build
+            cmds.append([
+                dotnet, "run", "--project", str(proj), "-c", "Release",
+                "--", "-dis", "-i", tmp_in, "-o", tmp_out,
+            ])
+        if dll:
+            cmds.append([dotnet, str(dll), "-dis", "-i", tmp_in, "-o", tmp_out])
+
+        last_err = ""
+        for cmd in cmds:
+            if verbose:
+                print(f"  [*] Moonsec: {' '.join(cmd)}")
+            try:
+                proc = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=timeout, env=env,
+                    cwd=str(proj.parent) if proj else None,
+                )
+                last_err = (proc.stderr or proc.stdout or "")[:400]
+            except subprocess.TimeoutExpired:
+                last_err = "timeout"
+                continue
+            except Exception as e:
+                last_err = str(e)
+                continue
+
+            if Path(tmp_out).is_file():
+                t = Path(tmp_out).read_text(encoding="utf-8", errors="replace")
+                if t.strip() and len(t.strip()) > 30:
+                    if verbose:
+                        print(f"  [+] Moonsec recovered {len(t):,} chars")
+                    return "-- MoonSec V3 (dotnet deobfuscator)\n" + t
+            # clear empty out for next try
+            try:
+                if Path(tmp_out).is_file():
+                    Path(tmp_out).write_text("")
+            except OSError:
+                pass
+
         if verbose:
-            print(f"  [*] Moonsec: {' '.join(cmd)}")
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        if Path(tmp_out).is_file():
-            t = Path(tmp_out).read_text(encoding="utf-8", errors="replace")
-            if t.strip():
-                if verbose:
-                    print(f"  [+] Moonsec recovered {len(t):,} chars")
-                return "-- MoonSec V3 disassembly (bytecode lift)\n" + t
-        if verbose and proc.returncode != 0:
-            print(f"  [!] Moonsec exit {proc.returncode}: {(proc.stderr or '')[:200]}")
+            print(f"  [!] Moonsec failed: {last_err}")
         return None
     except Exception as e:
         if verbose:
@@ -1934,6 +1810,7 @@ def run_moonsec_deobf(code: str, timeout: int = 120, verbose: bool = False) -> O
                     os.unlink(p)
                 except OSError:
                     pass
+
 
 
 def run_luraph_vmp_deobf(code: str, timeout: int = 180, verbose: bool = False) -> Optional[str]:
