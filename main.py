@@ -1584,6 +1584,110 @@ class WeAreDevDisassembler:
         return (op_type, details[:5], next_ip)
 
 
+
+# ============================================================
+# Prometheus / WeAreDev VM decompiler (Node subprocess)
+# Uses prostone4/Prometheus-Deobfuscator when Node is available.
+# Falls back to pure-Python P-table + trace path below.
+# ============================================================
+
+def _find_prometheus_dir() -> Optional[Path]:
+    """Locate Prometheus-Deobfuscator (env, cwd, sibling folders)."""
+    candidates = []
+    env = os.environ.get("PROMETHEUS_DEOBF_DIR") or os.environ.get("PDEOBF_DIR")
+    if env:
+        candidates.append(Path(env))
+    try:
+        here = Path(__file__).resolve().parent
+    except NameError:
+        here = Path.cwd()
+    candidates.extend([
+        here / "Prometheus-Deobfuscator",
+        here.parent / "Prometheus-Deobfuscator",
+        Path.cwd() / "Prometheus-Deobfuscator",
+        Path("/home/workdir/artifacts/Prometheus-Deobfuscator"),
+        Path("/opt/Prometheus-Deobfuscator"),
+    ])
+    for c in candidates:
+        try:
+            if (c / "bin" / "pdeobf.js").is_file():
+                return c
+        except OSError:
+            continue
+    return None
+
+
+def run_prometheus_deobf(code: str, timeout: int = 90, verbose: bool = False) -> Optional[str]:
+    """
+    Run Node Prometheus-Deobfuscator on WeAreDev/Prometheus-style payload.
+    Returns decompiled Lua source or None on failure / missing Node.
+    """
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        if verbose:
+            print("  [!] Prometheus: node not found in PATH")
+        return None
+    root = _find_prometheus_dir()
+    if root is None:
+        if verbose:
+            print("  [!] Prometheus: Prometheus-Deobfuscator not found "
+                  "(set PROMETHEUS_DEOBF_DIR or place folder next to main.py)")
+        return None
+    pdeobf = root / "bin" / "pdeobf.js"
+    tmp_in = tmp_out = None
+    try:
+        fd_in, tmp_in = tempfile.mkstemp(suffix=".lua", prefix="wad_in_")
+        os.close(fd_in)
+        fd_out, tmp_out = tempfile.mkstemp(suffix=".lua", prefix="wad_out_")
+        os.close(fd_out)
+        Path(tmp_in).write_text(code, encoding="utf-8", errors="replace")
+        cmd = [node, str(pdeobf), tmp_in, "-o", tmp_out]
+        if verbose:
+            print(f"  [*] Prometheus: {' '.join(cmd)}")
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(root),
+        )
+        out = Path(tmp_out).read_text(encoding="utf-8", errors="replace") if Path(tmp_out).is_file() else ""
+        if proc.returncode != 0 and not out.strip():
+            err = (proc.stderr or proc.stdout or "")[:400]
+            if verbose:
+                print(f"  [!] Prometheus exit {proc.returncode}: {err}")
+            return None
+        if not out.strip() or len(out.strip()) < 20:
+            if verbose:
+                print("  [!] Prometheus returned empty/short output")
+            return None
+        # Reject if still looks like raw WeAreDev VM
+        if "wearedevs.net/obfuscator" in out[:200] and "while" in out and out.count("if") > 50:
+            if verbose:
+                print("  [!] Prometheus output still looks obfuscated")
+            return None
+        if verbose:
+            print(f"  [+] Prometheus recovered {len(out):,} chars")
+        return out
+    except subprocess.TimeoutExpired:
+        if verbose:
+            print("  [!] Prometheus timed out")
+        return None
+    except Exception as e:
+        if verbose:
+            print(f"  [!] Prometheus error: {e}")
+        return None
+    finally:
+        for p in (tmp_in, tmp_out):
+            if p and os.path.exists(p):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
+
 class WeAreDevDeobfuscator:
     """WeAreDev v1.0.0 decompiler - v5.6 with arg-trace + CFF block extraction, enhanced tracer,
     arithmetic simplification, deep body mining, smart variable naming,
@@ -1614,6 +1718,18 @@ class WeAreDevDeobfuscator:
 
     @staticmethod
     def deobfuscate(code: str, engine: LuaEngine, verbose: bool) -> Optional[Tuple[str, dict]]:
+        # --- Phase 0: Prometheus VM decompiler (Node) — best quality for WeAreDev ---
+        prom = run_prometheus_deobf(code, timeout=90, verbose=verbose)
+        if prom:
+            meta = {
+                "method": "Prometheus-Deobfuscator (Node VM lift)",
+                "p_entries": 0,
+                "strings_decoded": 0,
+                "print_count": 0,
+                "trace_entries": 0,
+            }
+            return prom, meta
+
         if not engine.available:
             return None
         import subprocess
