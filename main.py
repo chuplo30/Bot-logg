@@ -448,6 +448,7 @@ def transpile_luau_compound_ops(code: str) -> Tuple[str, int]:
 class ObfuscatorDetector:
     # v5: expanded signatures - ordered by specificity (most specific first)
     SIGNATURES = [
+        ("Ironveil", ["Ironveil", "ironveil"]),
         ("IronBrew2", ["IronBrew-2.0"]),
         ("LuaObfuscator.com (Ferib)", ["LuaObfuscator.com", "Much Love, Ferib"]),
         ("AstroProtect", ["AstroProtect"]),
@@ -1586,56 +1587,201 @@ class WeAreDevDisassembler:
 
 
 # ============================================================
-# Prometheus / WeAreDev VM decompiler (Node subprocess)
-# Uses prostone4/Prometheus-Deobfuscator when Node is available.
-# Falls back to pure-Python P-table + trace path below.
+# External deobfuscator tools (Node / optional .NET / Lune)
+# Same model as Prometheus: detect -> subprocess -> source
+# Missing tool = silent None -> fall back to Python path
 # ============================================================
 
-def _find_prometheus_dir() -> Optional[Path]:
-    """Locate Prometheus-Deobfuscator (env, cwd, sibling folders)."""
-    candidates = []
-    env = os.environ.get("PROMETHEUS_DEOBF_DIR") or os.environ.get("PDEOBF_DIR")
-    if env:
-        candidates.append(Path(env))
+def _tool_roots() -> list:
+    """Candidate roots for cloned deobfuscator repos."""
+    roots = []
+    here = None
     try:
         here = Path(__file__).resolve().parent
     except NameError:
         here = Path.cwd()
-    candidates.extend([
-        here / "Prometheus-Deobfuscator",
-        here.parent / "Prometheus-Deobfuscator",
-        Path.cwd() / "Prometheus-Deobfuscator",
-        Path("/home/workdir/artifacts/Prometheus-Deobfuscator"),
-        Path("/opt/Prometheus-Deobfuscator"),
-    ])
-    for c in candidates:
-        try:
-            if (c / "bin" / "pdeobf.js").is_file():
-                return c
-        except OSError:
-            continue
+    for base in (here, here.parent, Path.cwd(), Path("/home/workdir/artifacts")):
+        if base and base not in roots:
+            roots.append(base)
+    env_root = os.environ.get("DEOBF_TOOLS_DIR")
+    if env_root:
+        roots.insert(0, Path(env_root))
+    return roots
+
+
+def _find_tool_dir(*relative_parts_options) -> Optional[Path]:
+    """Find first existing tool directory among option path tuples."""
+    for root in _tool_roots():
+        for parts in relative_parts_options:
+            cand = root.joinpath(*parts)
+            try:
+                if cand.is_dir():
+                    return cand
+            except OSError:
+                continue
     return None
 
 
-def run_prometheus_deobf(code: str, timeout: int = 90, verbose: bool = False) -> Optional[str]:
-    """
-    Run Node Prometheus-Deobfuscator on WeAreDev/Prometheus-style payload.
-    Returns decompiled Lua source or None on failure / missing Node.
-    """
+def _find_prometheus_dir() -> Optional[Path]:
+    env = os.environ.get("PROMETHEUS_DEOBF_DIR") or os.environ.get("PDEOBF_DIR")
+    if env and (Path(env) / "bin" / "pdeobf.js").is_file():
+        return Path(env)
+    return _find_tool_dir(
+        ("Prometheus-Deobfuscator",),
+        ("tools", "Prometheus-Deobfuscator"),
+    )
+
+
+def _find_ironveil_entry() -> Optional[Path]:
+    """Return path to Ironveil deobfuscator/index.js"""
+    env = os.environ.get("IRONVEIL_DEOBF_DIR")
+    if env:
+        p = Path(env)
+        for c in (p / "index.js", p / "deobfuscator" / "index.js"):
+            if c.is_file():
+                return c
+    d = _find_tool_dir(
+        ("Ironveil-Deobfuscator-V1", "deobfuscator"),
+        ("Ironveil-Deobfuscator-V1",),
+        ("tools", "Ironveil-Deobfuscator-V1", "deobfuscator"),
+    )
+    if d is None:
+        return None
+    for c in (d / "index.js", d / "deobfuscator" / "index.js"):
+        if c.is_file():
+            return c
+    return None
+
+
+def _find_luaobf_entry() -> Optional[Path]:
+    """Return path to LuaObfuscator-Deobfuscator/index.js"""
+    env = os.environ.get("LUAOBF_DEOBF_DIR")
+    if env and (Path(env) / "index.js").is_file():
+        return Path(env) / "index.js"
+    d = _find_tool_dir(
+        ("LuaObfuscator-Deobfuscator",),
+        ("tools", "LuaObfuscator-Deobfuscator"),
+    )
+    if d and (d / "index.js").is_file():
+        return d / "index.js"
+    return None
+
+
+def _find_moonsec_dll() -> Optional[Path]:
+    """Find built MoonsecDeobfuscator dll (optional .NET)."""
+    env = os.environ.get("MOONSEC_DEOBF_DIR")
+    search_roots = []
+    if env:
+        search_roots.append(Path(env))
+    d = _find_tool_dir(("MoonsecDeobfuscator",), ("tools", "MoonsecDeobfuscator"))
+    if d:
+        search_roots.append(d)
+    for root in search_roots:
+        for pattern in (
+            "**/MoonsecDeobfuscator.dll",
+            "**/bin/Release/**/MoonsecDeobfuscator.dll",
+            "**/bin/Debug/**/MoonsecDeobfuscator.dll",
+        ):
+            hits = list(root.glob(pattern))
+            if hits:
+                return hits[0]
+    return None
+
+
+def _find_luauvmp() -> Optional[str]:
+    """luauvmp CLI on PATH or under cloned repo."""
+    import shutil
+    which = shutil.which("luauvmp")
+    if which:
+        return which
+    env = os.environ.get("LUAU_VMP_DIR")
+    roots = []
+    if env:
+        roots.append(Path(env))
+    d = _find_tool_dir(("luau-vmp-deobf",), ("tools", "luau-vmp-deobf"))
+    if d:
+        roots.append(d)
+    for root in roots:
+        for c in (
+            root / "luauvmp",
+            root / ".venv" / "bin" / "luauvmp",
+        ):
+            if c.is_file():
+                return str(c)
+    return None
+
+
+def _run_node_script(script: Path, args: list, timeout: int = 90, verbose: bool = False, cwd: Optional[Path] = None) -> Optional[str]:
+    """Run node script; prefer reading output file if last args look like -o out, else stdout."""
     import shutil
     import subprocess
     node = shutil.which("node")
     if not node:
         if verbose:
-            print("  [!] Prometheus: node not found in PATH")
+            print("  [!] node not found")
+        return None
+    if not script or not script.is_file():
+        return None
+    cmd = [node, str(script)] + list(args)
+    if verbose:
+        print(f"  [*] node: {' '.join(cmd)}")
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(cwd or script.parent),
+        )
+    except subprocess.TimeoutExpired:
+        if verbose:
+            print("  [!] node tool timed out")
+        return None
+    except Exception as e:
+        if verbose:
+            print(f"  [!] node tool error: {e}")
+        return None
+    # Heuristic: if args contain an existing output path after -o/--out, read it
+    out_path = None
+    for i, a in enumerate(args):
+        if a in ("-o", "--out") and i + 1 < len(args):
+            out_path = Path(args[i + 1])
+            break
+    if out_path and out_path.is_file():
+        try:
+            text = out_path.read_text(encoding="utf-8", errors="replace")
+            if text.strip():
+                return text
+        except OSError:
+            pass
+    # Else stdout (some tools print source there)
+    out = (proc.stdout or "").strip()
+    # Strip ANSI
+    out = re.sub(r"\x1b\[[0-9;]*m", "", out)
+    if out and len(out) > 20 and "Missing input" not in out:
+        return out
+    if proc.returncode != 0 and verbose:
+        err = (proc.stderr or "")[:300]
+        print(f"  [!] node exit {proc.returncode}: {err}")
+    return None
+
+
+def run_prometheus_deobf(code: str, timeout: int = 90, verbose: bool = False) -> Optional[str]:
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        if verbose:
+            print("  [!] Prometheus: node not found")
         return None
     root = _find_prometheus_dir()
     if root is None:
         if verbose:
-            print("  [!] Prometheus: Prometheus-Deobfuscator not found "
-                  "(set PROMETHEUS_DEOBF_DIR or place folder next to main.py)")
+            print("  [!] Prometheus: not found (set PROMETHEUS_DEOBF_DIR)")
         return None
     pdeobf = root / "bin" / "pdeobf.js"
+    if not pdeobf.is_file():
+        return None
     tmp_in = tmp_out = None
     try:
         fd_in, tmp_in = tempfile.mkstemp(suffix=".lua", prefix="wad_in_")
@@ -1646,35 +1792,15 @@ def run_prometheus_deobf(code: str, timeout: int = 90, verbose: bool = False) ->
         cmd = [node, str(pdeobf), tmp_in, "-o", tmp_out]
         if verbose:
             print(f"  [*] Prometheus: {' '.join(cmd)}")
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=str(root),
-        )
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(root))
         out = Path(tmp_out).read_text(encoding="utf-8", errors="replace") if Path(tmp_out).is_file() else ""
-        if proc.returncode != 0 and not out.strip():
-            err = (proc.stderr or proc.stdout or "")[:400]
-            if verbose:
-                print(f"  [!] Prometheus exit {proc.returncode}: {err}")
-            return None
         if not out.strip() or len(out.strip()) < 20:
             if verbose:
-                print("  [!] Prometheus returned empty/short output")
-            return None
-        # Reject if still looks like raw WeAreDev VM
-        if "wearedevs.net/obfuscator" in out[:200] and "while" in out and out.count("if") > 50:
-            if verbose:
-                print("  [!] Prometheus output still looks obfuscated")
+                print(f"  [!] Prometheus empty (exit {proc.returncode})")
             return None
         if verbose:
             print(f"  [+] Prometheus recovered {len(out):,} chars")
         return out
-    except subprocess.TimeoutExpired:
-        if verbose:
-            print("  [!] Prometheus timed out")
-        return None
     except Exception as e:
         if verbose:
             print(f"  [!] Prometheus error: {e}")
@@ -1686,6 +1812,226 @@ def run_prometheus_deobf(code: str, timeout: int = 90, verbose: bool = False) ->
                     os.unlink(p)
                 except OSError:
                     pass
+
+
+def run_ironveil_deobf(code: str, timeout: int = 90, verbose: bool = False) -> Optional[str]:
+    entry = _find_ironveil_entry()
+    if not entry:
+        if verbose:
+            print("  [!] Ironveil: not found (set IRONVEIL_DEOBF_DIR)")
+        return None
+    tmp_in = tmp_out = None
+    try:
+        fd_in, tmp_in = tempfile.mkstemp(suffix=".lua", prefix="iv_in_")
+        os.close(fd_in)
+        fd_out, tmp_out = tempfile.mkstemp(suffix=".lua", prefix="iv_out_")
+        os.close(fd_out)
+        Path(tmp_in).write_text(code, encoding="utf-8", errors="replace")
+        # CLI: node index.js input.lua output.lua
+        out = _run_node_script(entry, [tmp_in, tmp_out], timeout=timeout, verbose=verbose, cwd=entry.parent)
+        if out and len(out.strip()) > 20:
+            if verbose:
+                print(f"  [+] Ironveil recovered {len(out):,} chars")
+            return out
+        # fallback read file
+        if Path(tmp_out).is_file():
+            t = Path(tmp_out).read_text(encoding="utf-8", errors="replace")
+            if t.strip():
+                return t
+        return None
+    except Exception as e:
+        if verbose:
+            print(f"  [!] Ironveil error: {e}")
+        return None
+    finally:
+        for p in (tmp_in, tmp_out):
+            if p and os.path.exists(p):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
+
+def run_luaobfuscator_deobf(code: str, timeout: int = 90, verbose: bool = False) -> Optional[str]:
+    entry = _find_luaobf_entry()
+    if not entry:
+        if verbose:
+            print("  [!] LuaObfuscator tool: not found (set LUAOBF_DEOBF_DIR)")
+        return None
+    tmp_in = tmp_out = None
+    try:
+        fd_in, tmp_in = tempfile.mkstemp(suffix=".lua", prefix="lo_in_")
+        os.close(fd_in)
+        fd_out, tmp_out = tempfile.mkstemp(suffix=".lua", prefix="lo_out_")
+        os.close(fd_out)
+        Path(tmp_in).write_text(code, encoding="utf-8", errors="replace")
+        # node index.js file.lua --out out.lua --stdout
+        out = _run_node_script(
+            entry, [tmp_in, "--out", tmp_out, "--stdout"],
+            timeout=timeout, verbose=verbose, cwd=entry.parent,
+        )
+        if out and len(out.strip()) > 20:
+            if verbose:
+                print(f"  [+] LuaObfuscator tool recovered {len(out):,} chars")
+            return out
+        if Path(tmp_out).is_file():
+            t = Path(tmp_out).read_text(encoding="utf-8", errors="replace")
+            if t.strip():
+                return t
+        return None
+    except Exception as e:
+        if verbose:
+            print(f"  [!] LuaObfuscator tool error: {e}")
+        return None
+    finally:
+        for p in (tmp_in, tmp_out):
+            if p and os.path.exists(p):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
+
+def run_moonsec_deobf(code: str, timeout: int = 120, verbose: bool = False) -> Optional[str]:
+    """Optional: MoonSec V3 via dotnet. Prefer -dis (readable disassembly) over raw bytecode."""
+    import shutil
+    import subprocess
+    dll = _find_moonsec_dll()
+    dotnet = shutil.which("dotnet")
+    if not dll or not dotnet:
+        if verbose:
+            print("  [!] Moonsec: need dotnet + built MoonsecDeobfuscator.dll")
+        return None
+    tmp_in = tmp_out = None
+    try:
+        fd_in, tmp_in = tempfile.mkstemp(suffix=".lua", prefix="ms_in_")
+        os.close(fd_in)
+        fd_out, tmp_out = tempfile.mkstemp(suffix=".txt", prefix="ms_out_")
+        os.close(fd_out)
+        Path(tmp_in).write_text(code, encoding="utf-8", errors="replace")
+        # -dis for human-readable disassembly
+        cmd = [dotnet, str(dll), "-dis", "-i", tmp_in, "-o", tmp_out]
+        if verbose:
+            print(f"  [*] Moonsec: {' '.join(cmd)}")
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if Path(tmp_out).is_file():
+            t = Path(tmp_out).read_text(encoding="utf-8", errors="replace")
+            if t.strip():
+                if verbose:
+                    print(f"  [+] Moonsec recovered {len(t):,} chars")
+                return "-- MoonSec V3 disassembly (bytecode lift)\n" + t
+        if verbose and proc.returncode != 0:
+            print(f"  [!] Moonsec exit {proc.returncode}: {(proc.stderr or '')[:200]}")
+        return None
+    except Exception as e:
+        if verbose:
+            print(f"  [!] Moonsec error: {e}")
+        return None
+    finally:
+        for p in (tmp_in, tmp_out):
+            if p and os.path.exists(p):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
+
+def run_luraph_vmp_deobf(code: str, timeout: int = 180, verbose: bool = False) -> Optional[str]:
+    """Optional: luau-vmp-deobf (Luraph v14). Needs luauvmp + preferably Lune."""
+    import shutil
+    import subprocess
+    cli = _find_luauvmp()
+    if not cli:
+        if verbose:
+            print("  [!] luauvmp not found (pip install -e luau-vmp-deobf + Lune)")
+        return None
+    tmp_dir = tempfile.mkdtemp(prefix="luraph_")
+    tmp_in = None
+    try:
+        fd_in, tmp_in = tempfile.mkstemp(suffix=".lua", prefix="lr_in_")
+        os.close(fd_in)
+        Path(tmp_in).write_text(code, encoding="utf-8", errors="replace")
+        out_dir = Path(tmp_dir) / "recovered"
+        cmd = [cli, "luraph-full", tmp_in, "-o", str(out_dir), "--no-lua-expert", "--force"]
+        if verbose:
+            print(f"  [*] Luraph-VMP: {' '.join(cmd)}")
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        # Prefer readable outputs
+        for name in (
+            "program.luaexpert.luau",
+            "program.decompiled.luau",
+            "program.pseudo.lua",
+            "embedded_main.luau",
+        ):
+            p = out_dir / name
+            if p.is_file() and p.stat().st_size > 20:
+                t = p.read_text(encoding="utf-8", errors="replace")
+                if verbose:
+                    print(f"  [+] Luraph-VMP recovered {name} ({len(t):,} chars)")
+                return t
+        # any .luau/.lua under out
+        if out_dir.is_dir():
+            for p in sorted(out_dir.rglob("*.luau")) + sorted(out_dir.rglob("*.lua")):
+                if p.stat().st_size > 40:
+                    return p.read_text(encoding="utf-8", errors="replace")
+        if verbose:
+            print(f"  [!] Luraph-VMP no output (exit {proc.returncode})")
+        return None
+    except Exception as e:
+        if verbose:
+            print(f"  [!] Luraph-VMP error: {e}")
+        return None
+    finally:
+        if tmp_in and os.path.exists(tmp_in):
+            try:
+                os.unlink(tmp_in)
+            except OSError:
+                pass
+        import shutil as _sh
+        try:
+            _sh.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+
+def run_external_deobf_for_detected(detected: Optional[str], code: str, verbose: bool = False) -> Optional[Tuple[str, str]]:
+    """
+    Try external tools based on detected obfuscator name.
+    Returns (source, method_label) or None.
+    """
+    d = (detected or "").lower()
+
+    # WeAreDev / Prometheus obfuscator family
+    if "wearedev" in d or d == "prometheus" or "psu" in d:
+        out = run_prometheus_deobf(code, verbose=verbose)
+        if out:
+            return out, "Prometheus-Deobfuscator (Node)"
+
+    # Ironveil (and sometimes mislabeled ironbrew-like)
+    if "ironveil" in d or "iron veil" in d:
+        out = run_ironveil_deobf(code, verbose=verbose)
+        if out:
+            return out, "Ironveil-Deobfuscator (Node)"
+
+    # LuaObfuscator.com / Ferib
+    if "luaobfuscator" in d or "ferib" in d:
+        out = run_luaobfuscator_deobf(code, verbose=verbose)
+        if out:
+            return out, "LuaObfuscator-Deobfuscator (Node)"
+
+    # MoonSec
+    if "moonsec" in d or "moon sec" in d:
+        out = run_moonsec_deobf(code, verbose=verbose)
+        if out:
+            return out, "MoonsecDeobfuscator (.NET)"
+
+    # Luraph
+    if "luraph" in d:
+        out = run_luraph_vmp_deobf(code, verbose=verbose)
+        if out:
+            return out, "luau-vmp-deobf (Luraph)"
+
+    return None
 
 
 class WeAreDevDeobfuscator:
@@ -3314,6 +3660,21 @@ class LuaDeobfuscator:
         obf_name = detected or "Unknown"
         prints = []
 
+        # External tools first (Prometheus / Ironveil / LuaObfuscator / Moonsec / Luraph)
+        try:
+            ext = run_external_deobf_for_detected(detected, code, verbose=self.verbose)
+            if ext:
+                source, method = ext
+                meta["method"] = method
+                obf_name = detected or method
+                if self.verbose:
+                    print(f"[+] External tool OK: {method}")
+                return obf_name, source, meta
+        except Exception as e:
+            if self.verbose:
+                print(f"[!] External tool error: {e}")
+            meta["external_error"] = str(e)
+
         for deobf_cls in self.DEOBFUSCATORS:
             cls_name = deobf_cls.__name__.replace("Deobfuscator", "")
 
@@ -3651,6 +4012,8 @@ async def l_cmd(ctx: commands.Context, *, link: Optional[str] = None):
         cleaned = with_wan_banner(cleaned)
 
         header = f"Obfuscator detected: **{obf_name}**\n"
+        if meta.get("method"):
+            header += f"Method: `{meta['method']}`\n"
 
         rubis_link = None
         if cleaned.strip() and cleaned.strip() != WAN_BANNER.strip():
