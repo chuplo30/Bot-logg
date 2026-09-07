@@ -47,14 +47,24 @@ def _bootstrap_deobf_env() -> None:
     _add_path(home / "node" / "bin")
     _add_path(Path("/opt/render/project/src") / "node" / "bin")
 
-    # .NET (dotnet-install.sh default)
-    dotnet_root = home / ".dotnet"
-    if dotnet_root.is_dir():
-        os.environ.setdefault("DOTNET_ROOT", str(dotnet_root))
-        _add_path(dotnet_root)
-        _add_path(dotnet_root / "tools")
+    # .NET — prefer project-local install (survives Render runtime), then $HOME
     os.environ.setdefault("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
     os.environ.setdefault("DOTNET_NOLOGO", "1")
+    for dotnet_root in (
+        app_root / ".dotnet",
+        cwd / ".dotnet",
+        Path("/opt/render/project/src/.dotnet"),
+        home / ".dotnet",
+    ):
+        if (dotnet_root / "dotnet").is_file() or (dotnet_root / "dotnet.exe").is_file():
+            os.environ["DOTNET_ROOT"] = str(dotnet_root)
+            _add_path(dotnet_root)
+            _add_path(dotnet_root / "tools")
+            break
+        if dotnet_root.is_dir():
+            os.environ.setdefault("DOTNET_ROOT", str(dotnet_root))
+            _add_path(dotnet_root)
+            _add_path(dotnet_root / "tools")
 
     # Tool repo locations (cloned next to main.py during build)
     pairs = [
