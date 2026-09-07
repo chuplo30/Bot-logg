@@ -18,6 +18,74 @@ try:
 except ImportError:
     API_NAMES = frozenset()
 
+
+# ============================================================
+# Render-friendly env bootstrap (Start Command = only: python main.py)
+# Sets PATH / tool dirs so Prometheus, Ironveil, LuaObfuscator, Moonsec work
+# without export in Render Start Command.
+# ============================================================
+def _bootstrap_deobf_env() -> None:
+    import os
+    from pathlib import Path
+    home = Path.home()
+    cwd = Path.cwd()
+    # Prefer directory of this file as app root
+    try:
+        app_root = Path(__file__).resolve().parent
+    except NameError:
+        app_root = cwd
+
+    def _add_path(p: Path) -> None:
+        if not p or not p.exists():
+            return
+        cur = os.environ.get("PATH", "")
+        s = str(p)
+        if s not in cur.split(os.pathsep):
+            os.environ["PATH"] = s + os.pathsep + cur
+
+    # Node (installed to $HOME/node during build)
+    _add_path(home / "node" / "bin")
+    _add_path(Path("/opt/render/project/src") / "node" / "bin")
+
+    # .NET (dotnet-install.sh default)
+    dotnet_root = home / ".dotnet"
+    if dotnet_root.is_dir():
+        os.environ.setdefault("DOTNET_ROOT", str(dotnet_root))
+        _add_path(dotnet_root)
+        _add_path(dotnet_root / "tools")
+    os.environ.setdefault("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
+    os.environ.setdefault("DOTNET_NOLOGO", "1")
+
+    # Tool repo locations (cloned next to main.py during build)
+    pairs = [
+        ("PROMETHEUS_DEOBF_DIR", app_root / "Prometheus-Deobfuscator"),
+        ("IRONVEIL_DEOBF_DIR", app_root / "Ironveil-Deobfuscator-V1" / "deobfuscator"),
+        ("LUAOBF_DEOBF_DIR", app_root / "LuaObfuscator-Deobfuscator"),
+        ("MOONSEC_DEOBF_DIR", app_root / "MoonsecDeobfuscator"),
+        ("LUAU_VMP_DIR", app_root / "luau-vmp-deobf"),
+        ("DEOBF_TOOLS_DIR", app_root),
+    ]
+    for key, p in pairs:
+        if key not in os.environ or not os.environ.get(key):
+            if p.exists():
+                os.environ[key] = str(p)
+
+    # Log once so Render logs show what was found
+    try:
+        import shutil
+        print("[bootstrap] PATH has node=", shutil.which("node"),
+              "dotnet=", shutil.which("dotnet"))
+        print("[bootstrap] PROMETHEUS=", os.environ.get("PROMETHEUS_DEOBF_DIR"))
+        print("[bootstrap] IRONVEIL=", os.environ.get("IRONVEIL_DEOBF_DIR"))
+        print("[bootstrap] LUAOBF=", os.environ.get("LUAOBF_DEOBF_DIR"))
+        print("[bootstrap] MOONSEC=", os.environ.get("MOONSEC_DEOBF_DIR"))
+    except Exception as e:
+        print("[bootstrap] log error:", e)
+
+
+_bootstrap_deobf_env()
+
+
 def _extract_lua_strings(code: str, mode: str = "all") -> List[str]:
     """Expanded string/identifier extractor using full Roblox API name DB."""
     strings = set()
@@ -4081,6 +4149,7 @@ async def help_cmd(ctx: commands.Context):
 
 
 if __name__ == "__main__":
+    _bootstrap_deobf_env()
     # v9 fix: always bind the keep-alive port first, regardless of whether
     # TOKEN is present. Previously start_keep_alive() only ran inside the
     # `else` branch, so a missing/misread TOKEN env var caused the process
