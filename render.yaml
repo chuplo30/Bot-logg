@@ -2,8 +2,8 @@ services:
   - type: web
     name: wan-deobf-bot
     runtime: python
-    buildCommand: pip install -r requirements.txt && curl -fsSL https://nodejs.org/dist/v20.18.0/node-v20.18.0-linux-x64.tar.xz -o /tmp/node.tar.xz && mkdir -p \[ HOME/node && tar -xJf /tmp/node.tar.xz -C \]HOME/node --strip-components=1 && (test -d Prometheus-Deobfuscator || git clone --depth 1 https://github.com/prostone4/Prometheus-Deobfuscator.git)
-    startCommand: export PATH="\[ HOME/node/bin: \]PATH" && export PROMETHEUS_DEOBF_DIR="\[ PWD/Prometheus-Deobfuscator" && python main.py
+    buildCommand: pip install -r requirements.txt && curl -fsSL https://nodejs.org/dist/v20.18.0/node-v20.18.0-linux-x64.tar.xz -o /tmp/node.tar.xz && mkdir -p \[ HOME/node && tar -xJf /tmp/node.tar.xz -C \]HOME/node --strip-components=1 && export PATH="\[ HOME/node/bin: \]PATH" && (test -d Prometheus-Deobfuscator || git clone --depth 1 https://github.com/prostone4/Prometheus-Deobfuscator.git) && (test -d Ironveil-Deobfuscator-V1 || git clone --depth 1 https://github.com/prostone55/Ironveil-Deobfuscator-V1.git) && (test -d LuaObfuscator-Deobfuscator || git clone --depth 1 https://github.com/prostone4/LuaObfuscator-Deobfuscator.git) && curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh && bash /tmp/dotnet-install.sh --channel 9.0 --install-dir "\[ PWD/.dotnet" && export DOTNET_ROOT=" \]PWD/.dotnet" && export PATH="\[ DOTNET_ROOT: \]PATH" && (test -d MoonsecDeobfuscator || git clone --depth 1 https://github.com/tupsutumppu/MoonsecDeobfuscator.git) && cd MoonsecDeobfuscator && "\[ DOTNET_ROOT/dotnet" build -c Release && cd ..
+    startCommand: python main.py
     envVars:
       - key: DISCORD_TOKEN
         sync: false
