@@ -4194,7 +4194,7 @@ async def l_cmd(ctx: commands.Context, *, link: Optional[str] = None):
         await ctx.reply(str(e))
         return
 
-    status_msg = await ctx.reply(f"Deobfuscating `{filename}`...")
+    status_msg = await ctx.reply(f"<a:loader:1547584320544448542> prossing `{filename}`...")
 
     try:
         obf_name, source, meta = deobfuscator.deobfuscate(code, filename)
