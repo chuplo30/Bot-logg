@@ -4366,13 +4366,18 @@ async def help_cmd(ctx: commands.Context):
         inline=False,
     )
     embed.add_field(
-        name=".d (disassemble)",
-        value="Attach a `.lua` or `.txt` file and run `.d` to get a bytecode disassembly of the WeAreDev VM. Shows opcodes, decoded strings, and VM structure.",
+        name=".detect",
+        value="Attach a `.lua` or `.txt` file and run `.d` to check obfuscate type",
         inline=False,
     )
     embed.add_field(
         name="Supported obfuscators",
         value="<:wearedev:1539221658257064056> WeAreDev, IronBrew2, WAN OBFUSCATE.",
+        inline=False,
+    )
+    embed.add_field(
+        name=".deo/deobf",
+        value="Attach a `.lua` or `.txt` file and run `.d` to deobfuscate",
         inline=False,
     )
     embed.set_footer(text="Comments are stripped from the recovered source automatically.")
